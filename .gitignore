@@ -36,6 +36,5 @@ recalc_*.py
 *.xlsx
 *.xls
 *.csv
-audit.py
 test_write.txt
 static/New Text Document.txt
