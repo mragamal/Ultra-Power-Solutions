@@ -537,7 +537,12 @@ def voucher_display_status(conn, voucher) -> str:
     status = safe(voucher["status"]).lower()
     if status == "reversed":
         return "reversed"
-    return "posted" if voucher_journal_status(conn, voucher) == "posted" else "draft"
+    journal_status = voucher_journal_status(conn, voucher)
+    if journal_status == "posted":
+        return "posted"
+    if journal_status == "pending_final_post":
+        return "pending_final_post"
+    return "draft"
 
 
 def voucher_payment_type(voucher):
@@ -1203,7 +1208,7 @@ def list_page(request: Request, voucher_type: str):
     conn = get_conn()
     rows = conn.execute("SELECT * FROM cash_vouchers WHERE voucher_type = ? ORDER BY id DESC", (voucher_type,)).fetchall()
     body = ""
-    status_ar = {"draft": "ظ…ط³ظˆط¯ط©", "posted": "ظ…ط±ط­ظ„", "reversed": "ظ…ط¹ظƒظˆط³"}
+    status_ar = {"draft": "ظ…ط³ظˆط¯ط©", "pending_final_post": "ظ…ظ†طھط¸ط± ط§ظ„طھط±ط­ظٹظ„ ط§ظ„ظ†ظ‡ط§ط¦ظٹ", "posted": "ظ…ط±ط­ظ„", "reversed": "ظ…ط¹ظƒظˆط³"}
     for row in rows:
         status = voucher_display_status(conn, row)
         status_cls = "green" if status == "posted" else ("red" if status == "reversed" else "orange")
@@ -1753,13 +1758,13 @@ def open_voucher_page(request: Request, voucher_id: int, voucher_type: str):
         conn.close()
         return HTMLResponse(tr(lang, "Voucher not found", "ط§ظ„ط³ظ†ط¯ ط؛ظٹط± ظ…ظˆط¬ظˆط¯"), status_code=404)
 
-    status = safe(voucher["status"]).lower()
+    status = voucher_display_status(conn, voucher)
     status_cls = "green" if status == "posted" else ("red" if status == "reversed" else "orange")
-    status_ar = {"draft": "ظ…ط³ظˆط¯ط©", "posted": "ظ…ط±ط­ظ„", "reversed": "ظ…ط¹ظƒظˆط³"}
+    status_ar = {"draft": "ظ…ط³ظˆط¯ط©", "pending_final_post": "ظ…ظ†طھط¸ط± ط§ظ„طھط±ط­ظٹظ„ ط§ظ„ظ†ظ‡ط§ط¦ظٹ", "posted": "ظ…ط±ط­ظ„", "reversed": "ظ…ط¹ظƒظˆط³"}
 
     post_btn = ""
     if status == "draft" and voucher_journal_status(conn, voucher) in ("", "draft") and accounting_allowed(request, "post"):
-        post_btn = f"<form method='post' action='{route_base(voucher_type)}/{voucher_id}/post' style='display:inline;'><button class='btn green' type='submit'>{tr(lang, 'Post', 'طھط±ط­ظٹظ„')}</button></form>"
+        post_btn = f"<form method='post' action='{route_base(voucher_type)}/{voucher_id}/post' style='display:inline;'><button class='btn green' type='submit'>{tr(lang, 'Send to Journal', 'طھط±ط­ظٹظ„ ظ„ظ„ط¬ظˆط±ظ†ط§ظ„')}</button></form>"
     draft_manage_btns = ""
     if voucher_can_modify(conn, voucher):
         draft_manage_btns = f"""
@@ -2154,39 +2159,18 @@ def set_voucher_status(request: Request, voucher_id: int, voucher_type: str, act
         return HTMLResponse("Voucher not found", status_code=404)
     try:
         if action == "post":
-            if safe(voucher["status"]).lower() != "draft":
-                raise Exception("Only draft vouchers can be posted")
-            submit_journal_for_final_post(conn, voucher["journal_id"])
-            conn.execute("UPDATE cash_vouchers SET status = 'posted' WHERE id = ?", (voucher_id,))
-            
-            # Update employee advance status if linked
-            if safe(voucher["party_type"]).lower() == "employee" and safe(voucher["employee_trans_type"]).lower() == "advance" and voucher["advance_id"]:
-                conn.execute("UPDATE employee_advances SET status = 'open' WHERE id = ?", (voucher["advance_id"],))
-            if safe(voucher["party_type"]).lower() == "employee" and safe(voucher["employee_trans_type"]).lower() == "custody" and safe_int(voucher["custody_request_id"]) > 0:
-                conn.execute("UPDATE employee_custody_requests SET status = 'open' WHERE id = ?", (voucher["custody_request_id"],))
-            if safe(voucher["source_type"]).lower() == "expense" and safe_int(voucher["source_id"]) > 0:
-                conn.execute(
-                    """
-                    UPDATE expenses
-                    SET status = 'posted',
-                        journal_id = ?,
-                        payment_account_code = ?
-                    WHERE id = ?
-                    """,
-                    (voucher["journal_id"], voucher["liquidity_account_code"], safe_int(voucher["source_id"])),
-                )
-            if safe(voucher["source_type"]).lower() == "employee_grant" and safe_int(voucher["source_id"]) > 0:
-                conn.execute(
-                    "UPDATE employee_grants SET status = 'payment_submitted', payment_voucher_id = ? WHERE id = ?",
-                    (voucher_id, safe_int(voucher["source_id"])),
-                )
-            if safe(voucher["source_type"]).lower() == "custody_return_request" and safe_int(voucher["source_id"]) > 0:
-                conn.execute(
-                    "UPDATE employee_custody_return_requests SET status = 'received' WHERE id = ?",
-                    (safe_int(voucher["source_id"]),),
-                )
+            journal_status = voucher_journal_status(conn, voucher)
+            if safe(voucher["status"]).lower() == "reversed" or journal_status == "posted":
+                raise Exception("Only unposted vouchers can be sent to journal")
+            if not safe_int(voucher["journal_id"]):
+                create_draft_journal(conn, voucher_id)
+                voucher = get_voucher(conn, voucher_id)
+                journal_status = voucher_journal_status(conn, voucher)
+            if journal_status in ("", "draft"):
+                submit_journal_for_final_post(conn, voucher["journal_id"])
+            conn.execute("UPDATE cash_vouchers SET status = 'pending_final_post' WHERE id = ?", (voucher_id,))
         else:
-            if safe(voucher["status"]).lower() != "posted":
+            if voucher_display_status(conn, voucher) != "posted":
                 raise Exception("Only posted vouchers can be reversed")
             allocated_rows = allocated_documents_for_voucher(conn, voucher)
             payment_type = voucher_payment_type(voucher)

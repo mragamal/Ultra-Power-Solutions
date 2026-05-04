@@ -701,12 +701,14 @@ def petty_cash_row_actions(lang, path: str, row) -> str:
 def custody_request_has_disbursement(conn, request_id: int) -> bool:
     row = conn.execute(
         """
-        SELECT id
-        FROM cash_vouchers
-        WHERE COALESCE(custody_request_id, 0) = ?
-          AND LOWER(COALESCE(voucher_type,'')) = 'payment'
-          AND LOWER(COALESCE(employee_trans_type,'')) = 'custody'
-          AND LOWER(COALESCE(status,'')) <> 'reversed'
+        SELECT v.id
+        FROM cash_vouchers v
+        JOIN journal_entries j ON j.id = v.journal_id
+        WHERE COALESCE(v.custody_request_id, 0) = ?
+          AND LOWER(COALESCE(v.voucher_type,'')) = 'payment'
+          AND LOWER(COALESCE(v.employee_trans_type,'')) = 'custody'
+          AND LOWER(COALESCE(v.status,'')) <> 'reversed'
+          AND LOWER(COALESCE(j.status,'')) = 'posted'
         LIMIT 1
         """,
         (request_id,),
@@ -749,12 +751,14 @@ def sync_custody_request_status_if_needed(conn, row):
 def return_request_has_receipt(conn, request_id: int) -> bool:
     row = conn.execute(
         """
-        SELECT id
-        FROM cash_vouchers
-        WHERE LOWER(COALESCE(source_type,'')) = 'custody_return_request'
-          AND COALESCE(source_id, 0) = ?
-          AND LOWER(COALESCE(voucher_type,'')) = 'receipt'
-          AND LOWER(COALESCE(status,'')) <> 'reversed'
+        SELECT v.id
+        FROM cash_vouchers v
+        JOIN journal_entries j ON j.id = v.journal_id
+        WHERE LOWER(COALESCE(v.source_type,'')) = 'custody_return_request'
+          AND COALESCE(v.source_id, 0) = ?
+          AND LOWER(COALESCE(v.voucher_type,'')) = 'receipt'
+          AND LOWER(COALESCE(v.status,'')) <> 'reversed'
+          AND LOWER(COALESCE(j.status,'')) = 'posted'
         LIMIT 1
         """,
         (request_id,),

@@ -597,17 +597,44 @@ def users_list(request: Request):
             <td>{r['role_name'] or r['role_code'] or ''}</td>
             <td>{status_label}</td>
             <td>
-                <a class="btn gray" href="/ui/system/users/{r['id']}">Open</a>
-                <a class="btn blue" href="/ui/system/users/{r['id']}/edit">Edit</a>
-                <a class="btn blue" href="/ui/system/users/{r['id']}/permissions">Permissions</a>
-                <form method="post" action="/ui/system/users/{r['id']}/toggle-active" style="display:inline;">
-                    <button class="btn {toggle_class}" type="submit">{toggle_label}</button>
-                </form>
+                <div class="row-actions">
+                    <a class="btn gray btn-sm" href="/ui/system/users/{r['id']}">Open</a>
+                    <a class="btn blue btn-sm" href="/ui/system/users/{r['id']}/edit">Edit</a>
+                    <a class="btn purple btn-sm" href="/ui/system/users/{r['id']}/permissions">Permissions</a>
+                    <form method="post" action="/ui/system/users/{r['id']}/toggle-active">
+                        <button class="btn {toggle_class} btn-sm" type="submit">{toggle_label}</button>
+                    </form>
+                </div>
             </td>
         </tr>
         """
 
     html = f"""
+    <style>
+        .row-actions {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: nowrap;
+            white-space: nowrap;
+        }}
+        .row-actions form {{
+            display: inline-flex;
+            margin: 0;
+        }}
+        .btn.btn-sm {{
+            min-height: 36px;
+            padding: 8px 12px;
+            border-radius: 10px;
+            font-size: 14px;
+            line-height: 1;
+        }}
+        @media (max-width: 1100px) {{
+            .row-actions {{
+                flex-wrap: wrap;
+            }}
+        }}
+    </style>
     <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
             <h2>Users</h2>
@@ -683,8 +710,6 @@ def new_user_form(request: Request):
     </div>
     """
     return HTMLResponse(render_page("New User", html, lang, current_path=request.url.path))
-
-
 @router.post("/ui/system/users/new")
 @require_login("users", "create")
 def create_user(
