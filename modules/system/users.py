@@ -586,15 +586,23 @@ def users_list(request: Request):
 
     body = ""
     for r in rows:
+        is_active = int(r["is_active"] or 0) == 1
+        status_label = "Active" if is_active else "Inactive"
+        toggle_label = "Deactivate" if is_active else "Activate"
+        toggle_class = "red" if is_active else "green"
         body += f"""
         <tr>
             <td>{r['username'] or ''}</td>
             <td>{r['full_name'] or ''}</td>
             <td>{r['role_name'] or r['role_code'] or ''}</td>
-            <td>{"Active" if int(r['is_active'] or 0) == 1 else "Inactive"}</td>
+            <td>{status_label}</td>
             <td>
                 <a class="btn gray" href="/ui/system/users/{r['id']}">Open</a>
+                <a class="btn blue" href="/ui/system/users/{r['id']}/edit">Edit</a>
                 <a class="btn blue" href="/ui/system/users/{r['id']}/permissions">Permissions</a>
+                <form method="post" action="/ui/system/users/{r['id']}/toggle-active" style="display:inline;">
+                    <button class="btn {toggle_class}" type="submit">{toggle_label}</button>
+                </form>
             </td>
         </tr>
         """
@@ -764,12 +772,201 @@ def open_user(request: Request, user_id: int):
         </div>
 
         <div style="margin-top:18px;">
+            <a class="btn blue" href="/ui/system/users/{user_id}/edit">Edit User</a>
             <a class="btn blue" href="/ui/system/users/{user_id}/permissions">Manage Permissions</a>
             <a class="btn gray" href="/ui/system/users">Back</a>
         </div>
     </div>
     """
     return HTMLResponse(render_page("User", html, lang, current_path=request.url.path))
+
+
+@router.get("/ui/system/users/{user_id}/edit", response_class=HTMLResponse)
+@require_login("users", "edit")
+def edit_user_form(request: Request, user_id: int):
+    lang = get_lang(request)
+    conn = get_conn()
+    user = conn.execute("""
+        SELECT *
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+    """, (user_id,)).fetchone()
+    conn.close()
+
+    if not user:
+        return HTMLResponse("User not found", status_code=404)
+
+    active_selected = "selected" if int(user["is_active"] or 0) == 1 else ""
+    inactive_selected = "selected" if int(user["is_active"] or 0) == 0 else ""
+
+    html = f"""
+    <div class="card">
+        <h2>Edit User</h2>
+
+        <form method="post" action="/ui/system/users/{user_id}/edit">
+            <div class="row">
+                <div class="col">
+                    <label>Username</label>
+                    <input name="username" value="{user['username'] or ''}" required>
+                </div>
+                <div class="col">
+                    <label>Full Name</label>
+                    <input name="full_name" value="{user['full_name'] or ''}" required>
+                </div>
+            </div>
+
+            <div class="row" style="margin-top:14px;">
+                <div class="col">
+                    <label>Role</label>
+                    <select name="role_code" required>
+                        {roles_html_options(user['role_code'] or '')}
+                    </select>
+                </div>
+                <div class="col">
+                    <label>Status</label>
+                    <select name="is_active">
+                        <option value="1" {active_selected}>Active</option>
+                        <option value="0" {inactive_selected}>Inactive</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-actions">
+                <button class="btn green" type="submit">Save</button>
+                <a class="btn gray" href="/ui/system/users/{user_id}">Back</a>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Reset Password</h2>
+        <form method="post" action="/ui/system/users/{user_id}/password">
+            <div class="row">
+                <div class="col">
+                    <label>New Password</label>
+                    <input type="password" name="new_password" required>
+                </div>
+                <div class="col">
+                    <label>Confirm Password</label>
+                    <input type="password" name="confirm_password" required>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button class="btn blue" type="submit">Update Password</button>
+            </div>
+        </form>
+    </div>
+    """
+    return HTMLResponse(render_page("Edit User", html, lang, current_path=request.url.path))
+
+
+@router.post("/ui/system/users/{user_id}/edit")
+@require_login("users", "edit")
+def update_user(
+    request: Request,
+    user_id: int,
+    username: str = Form(...),
+    full_name: str = Form(...),
+    role_code: str = Form(...),
+    is_active: int = Form(1),
+):
+    current = current_user(request) or {}
+    if int(current.get("user_id") or 0) == int(user_id):
+        is_active = 1
+
+    conn = get_conn()
+    existing = conn.execute("SELECT id FROM users WHERE id = ? LIMIT 1", (user_id,)).fetchone()
+    duplicate = conn.execute("""
+        SELECT id
+        FROM users
+        WHERE username = ?
+          AND id <> ?
+        LIMIT 1
+    """, ((username or "").strip(), user_id)).fetchone()
+
+    if not existing:
+        conn.close()
+        return HTMLResponse("User not found", status_code=404)
+
+    if duplicate:
+        conn.close()
+        return HTMLResponse(render_page(
+            "Edit User",
+            f'<div class="card"><h2>Edit User</h2><p style="color:red;">Username already exists.</p><a class="btn gray" href="/ui/system/users/{user_id}/edit">Back</a></div>',
+            get_lang(request),
+            current_path=request.url.path
+        ), status_code=400)
+
+    conn.execute("""
+        UPDATE users
+        SET username = ?, full_name = ?, role_code = ?, is_active = ?
+        WHERE id = ?
+    """, (
+        (username or "").strip(),
+        (full_name or "").strip(),
+        (role_code or "").strip(),
+        int(is_active or 0),
+        user_id,
+    ))
+    conn.commit()
+    conn.close()
+
+    return RedirectResponse(f"/ui/system/users/{user_id}", status_code=302)
+
+
+@router.post("/ui/system/users/{user_id}/password")
+@require_login("users", "edit")
+def reset_user_password(
+    request: Request,
+    user_id: int,
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    lang = get_lang(request)
+    if (new_password or "") != (confirm_password or ""):
+        return HTMLResponse(render_page(
+            "Reset Password",
+            f'<div class="card"><h2>Reset Password</h2><p style="color:red;">Password confirmation does not match.</p><a class="btn gray" href="/ui/system/users/{user_id}/edit">Back</a></div>',
+            lang,
+            current_path=request.url.path
+        ), status_code=400)
+
+    conn = get_conn()
+    user = conn.execute("SELECT id FROM users WHERE id = ? LIMIT 1", (user_id,)).fetchone()
+    if not user:
+        conn.close()
+        return HTMLResponse("User not found", status_code=404)
+
+    conn.execute("""
+        UPDATE users
+        SET password_hash = ?
+        WHERE id = ?
+    """, (hash_password(new_password), user_id))
+    conn.commit()
+    conn.close()
+
+    return RedirectResponse(f"/ui/system/users/{user_id}/edit", status_code=302)
+
+
+@router.post("/ui/system/users/{user_id}/toggle-active")
+@require_login("users", "edit")
+def toggle_user_active(request: Request, user_id: int):
+    current = current_user(request) or {}
+    if int(current.get("user_id") or 0) == int(user_id):
+        return RedirectResponse("/ui/system/users", status_code=302)
+
+    conn = get_conn()
+    user = conn.execute("SELECT is_active FROM users WHERE id = ? LIMIT 1", (user_id,)).fetchone()
+    if not user:
+        conn.close()
+        return HTMLResponse("User not found", status_code=404)
+
+    new_state = 0 if int(user["is_active"] or 0) == 1 else 1
+    conn.execute("UPDATE users SET is_active = ? WHERE id = ?", (new_state, user_id))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/ui/system/users", status_code=302)
 
 
 @router.get("/ui/system/users/{user_id}/permissions", response_class=HTMLResponse)
