@@ -1,0 +1,16 @@
+[Unit]
+Description=Premium One ERP
+After=network.target
+
+[Service]
+User=erp
+Group=www-data
+WorkingDirectory=/var/www/premium-one-erp
+Environment="SESSION_SECRET_KEY=change-this-long-random-secret"
+Environment="ERP_DB_PATH=/var/www/premium-one-erp/data/erp.db"
+ExecStart=/var/www/premium-one-erp/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

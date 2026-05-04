@@ -1,3 +1,0 @@
-cd C:\Users\Owner\telecom_ops
-venv\Scripts\activate
-uvicorn main:app --reload

@@ -1,0 +1,29 @@
+<h2>Petty Cash</h2>
+
+<a href="/ui/accounting/petty-cash/new" 
+   style="background:green;color:white;padding:8px 12px;text-decoration:none;">
+   + New Petty Cash
+</a>
+
+<br><br>
+
+<table border="1" cellpadding="8">
+<tr>
+    <th>Employee</th>
+    <th>Balance</th>
+    <th>Actions</th>
+</tr>
+
+{% for r in rows %}
+<tr>
+    <td>{{r.employee}}</td>
+    <td>{{r.balance}}</td>
+    <td>
+        <a href="/ui/accounting/petty-cash/spend/{{r.id}}" 
+           style="background:orange;color:white;padding:5px 10px;">
+           Spend
+        </a>
+    </td>
+</tr>
+{% endfor %}
+</table>

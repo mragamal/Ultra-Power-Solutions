@@ -1,0 +1,15 @@
+<h2>New Petty Cash</h2>
+
+<form method="post" action="/petty-cash/create">
+
+<select name="employee_id">
+{% for e in employees %}
+<option value="{{e.id}}">{{e.name}}</option>
+{% endfor %}
+</select>
+
+<input type="number" name="amount" placeholder="Amount">
+
+<button type="submit">Save</button>
+
+</form>

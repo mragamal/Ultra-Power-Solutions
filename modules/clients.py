@@ -1,13 +1,49 @@
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
+
+from auth import current_user
 from layout import render_page
 from db import get_conn
-from auth import current_user
 
 router = APIRouter()
 
 
-def init_clients_db():
+def safe_float(x):
+    try:
+        return float(x or 0)
+    except Exception:
+        return 0.0
+
+
+def table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def scalar(conn, query: str, params=(), default=0):
+    try:
+        row = conn.execute(query, params).fetchone()
+        if not row:
+            return default
+        return default if row[0] is None else row[0]
+    except Exception:
+        return default
+
+
+def next_invoice_no(conn) -> str:
+    last_id = scalar(conn, "SELECT COALESCE(MAX(id), 0) FROM invoices", default=0)
+    return f"INV-{int(last_id) + 1:05d}"
+
+
+def next_entry_no(conn) -> str:
+    last_id = scalar(conn, "SELECT COALESCE(MAX(id), 0) FROM journal_entries", default=0)
+    return f"JE-{int(last_id) + 1:05d}"
+
+
+def ensure_tables():
     conn = get_conn()
     cur = conn.cursor()
 
@@ -27,25 +63,16 @@ def init_clients_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_id INTEGER,
             invoice_no TEXT,
-            invoice_date TEXT DEFAULT CURRENT_TIMESTAMP,
+            invoice_date TEXT,
             subtotal REAL DEFAULT 0,
             tax_percent REAL DEFAULT 0,
             tax_value REAL DEFAULT 0,
+            withholding_percent REAL DEFAULT 0,
+            withholding_value REAL DEFAULT 0,
             total REAL DEFAULT 0,
             paid_amount REAL DEFAULT 0,
-            status TEXT DEFAULT 'unpaid',
+            status TEXT DEFAULT 'draft',
             notes TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS invoice_lines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            invoice_id INTEGER,
-            description TEXT,
-            quantity REAL DEFAULT 1,
-            unit_price REAL DEFAULT 0,
-            line_subtotal REAL DEFAULT 0
         )
     """)
 
@@ -54,632 +81,513 @@ def init_clients_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             invoice_id INTEGER,
             amount REAL,
+            payment_method TEXT DEFAULT 'cash',
             payment_date TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT,
+            name TEXT,
+            type TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS journal_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_no TEXT,
+            entry_date TEXT,
+            description TEXT,
+            reference_type TEXT,
+            reference_id INTEGER
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS journal_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id INTEGER,
+            account_id INTEGER,
+            debit REAL DEFAULT 0,
+            credit REAL DEFAULT 0,
+            line_description TEXT
+        )
+    """)
+
+    defaults = [
+        ("1001", "Cash", "asset"),
+        ("1002", "Bank", "asset"),
+        ("1100", "Accounts Receivable", "asset"),
+        ("1110", "Withholding Tax Receivable", "asset"),
+        ("2100", "Output VAT", "liability"),
+        ("4000", "Sales Revenue", "income"),
+    ]
+    for code, name, acc_type in defaults:
+        exists = conn.execute("SELECT id FROM accounts WHERE code = ?", (code,)).fetchone()
+        if not exists:
+            cur.execute(
+                "INSERT INTO accounts (code, name, type) VALUES (?, ?, ?)",
+                (code, name, acc_type),
+            )
 
     conn.commit()
     conn.close()
 
 
-init_clients_db()
+def get_account_id_by_code(conn, code: str):
+    row = conn.execute("SELECT id FROM accounts WHERE code = ?", (code,)).fetchone()
+    return row["id"] if row else None
 
 
-def calc_invoice_status(total: float, paid_amount: float) -> str:
-    if paid_amount <= 0:
-        return "unpaid"
-    if paid_amount < total:
-        return "partial"
-    return "paid"
+def post_journal_entry(conn, entry_date: str, description: str, reference_type: str, reference_id: int, lines: list[dict]):
+    existing = conn.execute("""
+        SELECT id FROM journal_entries
+        WHERE reference_type = ? AND reference_id = ?
+        LIMIT 1
+    """, (reference_type, reference_id)).fetchone()
+    if existing:
+        return existing["id"]
+
+    total_debit = round(sum(safe_float(x.get("debit")) for x in lines), 2)
+    total_credit = round(sum(safe_float(x.get("credit")) for x in lines), 2)
+    if total_debit <= 0 or total_credit <= 0 or total_debit != total_credit:
+        return None
+
+    entry_no = next_entry_no(conn)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO journal_entries (entry_no, entry_date, description, reference_type, reference_id)
+        VALUES (?, ?, ?, ?, ?)
+    """, (entry_no, entry_date, description, reference_type, reference_id))
+    entry_id = cur.lastrowid
+
+    for line in lines:
+        cur.execute("""
+            INSERT INTO journal_lines (entry_id, account_id, debit, credit, line_description)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            entry_id,
+            line["account_id"],
+            safe_float(line.get("debit")),
+            safe_float(line.get("credit")),
+            line.get("line_description", ""),
+        ))
+
+    conn.commit()
+    return entry_id
 
 
-def next_invoice_no(conn) -> str:
-    last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM invoices").fetchone()[0]
-    return f"INV-{last_id + 1:05d}"
+ensure_tables()
 
 
-@router.get("/ui/clients", response_class=HTMLResponse)
-def clients_page(request: Request):
+@router.get("/ui/clients")
+def old_clients_redirect():
+    return RedirectResponse("/ui/customers", status_code=302)
+
+
+@router.get("/ui/customers", response_class=HTMLResponse)
+def customers_page(request: Request):
     user = current_user(request)
     if not user:
-        return RedirectResponse(url="/login", status_code=302)
+        return RedirectResponse("/login", status_code=302)
 
     conn = get_conn()
-
-    clients = conn.execute("""
-        SELECT * FROM clients ORDER BY id DESC
-    """).fetchall()
-
+    customers = conn.execute("SELECT * FROM clients ORDER BY id DESC").fetchall()
     invoices = conn.execute("""
-        SELECT invoices.*, clients.name AS client_name
+        SELECT invoices.*, clients.name AS customer_name
         FROM invoices
         LEFT JOIN clients ON clients.id = invoices.client_id
         ORDER BY invoices.id DESC
     """).fetchall()
 
-    total_clients = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
-    total_invoices = conn.execute("SELECT COUNT(*) FROM invoices").fetchone()[0]
-    total_sales = conn.execute("SELECT COALESCE(SUM(total), 0) FROM invoices").fetchone()[0]
-    total_collected = conn.execute("SELECT COALESCE(SUM(paid_amount), 0) FROM invoices").fetchone()[0]
-    total_due = float(total_sales or 0) - float(total_collected or 0)
-
-    client_rows = ""
-    for c in clients:
-        client_rows += f"""
+    customer_rows = ""
+    for c in customers:
+        customer_rows += f"""
         <tr>
-            <td>{c["id"]}</td>
-            <td>{c["name"] or ""}</td>
-            <td>{c["phone"] or ""}</td>
-            <td>{c["email"] or ""}</td>
-            <td>{c["address"] or ""}</td>
-            <td>
-                <a class="btn btn-light" href="/ui/clients/edit/{c["id"]}">Edit</a>
-                <a class="btn btn-light" href="/ui/clients/invoices/new?client_id={c["id"]}">Invoice</a>
+            <td style="padding:12px;">{c["id"]}</td>
+            <td style="padding:12px;">{c["name"] or ""}</td>
+            <td style="padding:12px;">{c["phone"] or ""}</td>
+            <td style="padding:12px;">
+                <a class="lang-btn" href="/ui/customers/invoices/new?customer_id={c["id"]}">New Invoice</a>
             </td>
         </tr>
         """
 
     invoice_rows = ""
     for i in invoices:
-        status_class = "badge-unpaid"
-        if i["status"] == "paid":
-            status_class = "badge-paid"
-        elif i["status"] == "partial":
-            status_class = "badge-partial"
-
-        due_amount = float(i["total"] or 0) - float(i["paid_amount"] or 0)
-
+        due = safe_float(i["total"]) - safe_float(i["paid_amount"])
         invoice_rows += f"""
         <tr>
-            <td>{i["invoice_no"] or f"INV-{i['id']:05d}"}</td>
-            <td>{i["client_name"] or "-"}</td>
-            <td>{float(i["subtotal"] or 0):.2f}</td>
-            <td>{float(i["tax_value"] or 0):.2f}</td>
-            <td>{float(i["total"] or 0):.2f}</td>
-            <td>{float(i["paid_amount"] or 0):.2f}</td>
-            <td>{due_amount:.2f}</td>
-            <td><span class="badge {status_class}">{i["status"]}</span></td>
-            <td>
-                <a class="btn btn-light" href="/ui/clients/invoices/{i["id"]}">View</a>
-            </td>
+            <td style="padding:12px;"><a href="/ui/customers/invoices/{i["id"]}">{i["invoice_no"] or "-"}</a></td>
+            <td style="padding:12px;">{i["customer_name"] or "-"}</td>
+            <td style="padding:12px;">{safe_float(i["total"]):.2f}</td>
+            <td style="padding:12px;">{safe_float(i["paid_amount"]):.2f}</td>
+            <td style="padding:12px;">{due:.2f}</td>
+            <td style="padding:12px;">{i["status"] or "draft"}</td>
         </tr>
         """
 
     conn.close()
 
     content = f"""
-        <h1 class="page-title">Clients</h1>
-        <div class="page-subtitle">Clients, invoices and payments</div>
+    <h1 class="page-title">Customers</h1>
+    <div class="page-subtitle">Add customer + create invoice + confirm + payment</div>
 
-        <div class="toolbar">
-            <div class="toolbar-left">
-                <button class="btn btn-primary" onclick="document.getElementById('add-client-form').scrollIntoView();">New Client</button>
-                <a class="btn btn-light" href="/ui/clients/invoices/new">New Invoice</a>
-            </div>
-        </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px;">
+        <a class="btn-primary" href="/ui/customers/invoices/new">New Invoice</a>
+    </div>
 
-        <div class="stat-grid">
-            <div class="stat-card">
-                <div class="stat-label">Clients</div>
-                <div class="stat-value">{total_clients}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Invoices</div>
-                <div class="stat-value">{total_invoices}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Sales</div>
-                <div class="stat-value">{float(total_sales):.2f}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Due</div>
-                <div class="stat-value">{float(total_due):.2f}</div>
-            </div>
-        </div>
+    <div class="card" style="margin-bottom:18px;">
+        <h2 style="margin-bottom:14px;">Add Customer</h2>
+        <form method="post" action="/ui/customers/add">
+            <input name="name" placeholder="Customer Name" required>
+            <input name="phone" placeholder="Phone">
+            <input name="email" placeholder="Email">
+            <input name="address" placeholder="Address">
+            <input name="notes" placeholder="Notes">
+            <button class="btn-primary" type="submit">Save Customer</button>
+        </form>
+    </div>
 
-        <div class="two-cols">
+    <div class="card" style="margin-bottom:18px;">
+        <h2 style="margin-bottom:14px;">Customers List</h2>
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+                <tr>
+                    <th style="text-align:left; padding:12px;">ID</th>
+                    <th style="text-align:left; padding:12px;">Name</th>
+                    <th style="text-align:left; padding:12px;">Phone</th>
+                    <th style="text-align:left; padding:12px;">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {customer_rows if customer_rows else '<tr><td colspan="4" style="padding:12px;">No customers</td></tr>'}
+            </tbody>
+        </table>
+    </div>
 
-            <div>
-                <div class="panel" id="add-client-form">
-                    <div class="panel-header">
-                        <div class="panel-title">Add Client</div>
-                    </div>
-                    <div class="panel-body">
-                        <form method="post" action="/ui/clients/add" class="form-grid">
-                            <div class="form-group">
-                                <label>Name</label>
-                                <input name="name" required>
-                            </div>
-                            <div class="form-group">
-                                <label>Phone</label>
-                                <input name="phone">
-                            </div>
-                            <div class="form-group">
-                                <label>Email</label>
-                                <input name="email">
-                            </div>
-                            <div class="form-group">
-                                <label>Address</label>
-                                <input name="address">
-                            </div>
-                            <div class="form-group">
-                                <label>Notes</label>
-                                <textarea name="notes" rows="3"></textarea>
-                            </div>
-                            <button class="btn btn-primary" type="submit">Save Client</button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-
-            <div>
-                <div class="panel" style="margin-bottom:22px;">
-                    <div class="panel-header">
-                        <div class="panel-title">Clients List</div>
-                    </div>
-                    <div class="panel-body table-wrap">
-                        <table class="erp-table">
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Name</th>
-                                    <th>Phone</th>
-                                    <th>Email</th>
-                                    <th>Address</th>
-                                    <th>Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {client_rows}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-header">
-                        <div class="panel-title">Invoices</div>
-                    </div>
-                    <div class="panel-body table-wrap">
-                        <table class="erp-table">
-                            <thead>
-                                <tr>
-                                    <th>Invoice No</th>
-                                    <th>Client</th>
-                                    <th>Subtotal</th>
-                                    <th>Tax</th>
-                                    <th>Total</th>
-                                    <th>Paid</th>
-                                    <th>Due</th>
-                                    <th>Status</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {invoice_rows}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-        </div>
+    <div class="card">
+        <h2 style="margin-bottom:14px;">Invoices</h2>
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+                <tr>
+                    <th style="text-align:left; padding:12px;">Invoice No</th>
+                    <th style="text-align:left; padding:12px;">Customer</th>
+                    <th style="text-align:left; padding:12px;">Total</th>
+                    <th style="text-align:left; padding:12px;">Paid</th>
+                    <th style="text-align:left; padding:12px;">Due</th>
+                    <th style="text-align:left; padding:12px;">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {invoice_rows if invoice_rows else '<tr><td colspan="6" style="padding:12px;">No invoices</td></tr>'}
+            </tbody>
+        </table>
+    </div>
     """
 
-    return HTMLResponse(render_page("Clients", "clients", content, user["username"]))
+    return HTMLResponse(render_page("Customers", "dashboard", content, user["username"], "en"))
 
 
-@router.get("/ui/clients/invoices/new", response_class=HTMLResponse)
-def new_invoice_page(request: Request, client_id: int | None = None):
+@router.post("/ui/customers/add")
+def add_customer(
+    name: str = Form(...),
+    phone: str = Form(""),
+    email: str = Form(""),
+    address: str = Form(""),
+    notes: str = Form(""),
+):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO clients (name, phone, email, address, notes)
+        VALUES (?, ?, ?, ?, ?)
+    """, (name, phone, email, address, notes))
+    conn.commit()
+    conn.close()
+    return RedirectResponse("/ui/customers", status_code=303)
+
+
+@router.get("/ui/customers/invoices/new", response_class=HTMLResponse)
+def new_invoice_page(request: Request, customer_id: int | None = None):
     user = current_user(request)
     if not user:
-        return RedirectResponse(url="/login", status_code=302)
+        return RedirectResponse("/login", status_code=302)
 
     conn = get_conn()
-    clients = conn.execute("SELECT * FROM clients ORDER BY name").fetchall()
-    suggested_invoice_no = next_invoice_no(conn)
+    customers = conn.execute("SELECT id, name FROM clients ORDER BY name").fetchall()
+    invoice_no = next_invoice_no(conn)
     conn.close()
 
-    client_options = ""
-    for c in clients:
-        selected = "selected" if client_id and c["id"] == client_id else ""
-        client_options += f'<option value="{c["id"]}" {selected}>{c["id"]} - {c["name"]}</option>'
+    options = ""
+    for c in customers:
+        selected = "selected" if customer_id and c["id"] == customer_id else ""
+        options += f'<option value="{c["id"]}" {selected}>{c["name"]}</option>'
 
     content = f"""
-        <h1 class="page-title">New Invoice</h1>
-        <div class="page-subtitle">Create quantity-price-tax invoice</div>
+    <h1 class="page-title">New Invoice</h1>
 
-        <div class="panel" style="max-width:900px;">
-            <div class="panel-header">
-                <div class="panel-title">Invoice Entry</div>
-            </div>
-            <div class="panel-body">
-                <form method="post" action="/ui/clients/invoices/create" class="form-grid">
-
-                    <div class="form-group">
-                        <label>Client</label>
-                        <select name="client_id" required>
-                            <option value="">Select client</option>
-                            {client_options}
-                        </select>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Invoice Number</label>
-                        <input name="invoice_no" value="{suggested_invoice_no}">
-                    </div>
-
-                    <div class="form-group">
-                        <label>Description</label>
-                        <input name="description" required placeholder="Service / Product">
-                    </div>
-
-                    <div class="form-group">
-                        <label>Quantity</label>
-                        <input name="quantity" type="number" step="0.01" value="1" required>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Unit Price</label>
-                        <input name="unit_price" type="number" step="0.01" required>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Tax %</label>
-                        <input name="tax_percent" type="number" step="0.01" value="14" required>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Notes</label>
-                        <textarea name="notes" rows="3"></textarea>
-                    </div>
-
-                    <div style="display:flex; gap:12px;">
-                        <button class="btn btn-primary" type="submit">Create Invoice</button>
-                        <a class="btn btn-light" href="/ui/clients">Back</a>
-                    </div>
-                </form>
-            </div>
-        </div>
+    <div class="card">
+        <form method="post" action="/ui/customers/invoices/create">
+            <select name="customer_id" required>
+                <option value="">Select Customer</option>
+                {options}
+            </select>
+            <input name="invoice_no" value="{invoice_no}">
+            <input type="date" name="invoice_date">
+            <input type="number" step="0.01" name="amount" placeholder="Amount" required>
+            <input type="number" step="0.01" name="tax_percent" value="14" placeholder="Tax %">
+            <input type="number" step="0.01" name="withholding_percent" value="0" placeholder="Withholding %">
+            <input name="notes" placeholder="Notes">
+            <button class="btn-primary" type="submit">Create Invoice</button>
+        </form>
+    </div>
     """
 
-    return HTMLResponse(render_page("Clients", "clients", content, user["username"]))
+    return HTMLResponse(render_page("New Invoice", "dashboard", content, user["username"], "en"))
 
 
-@router.post("/ui/clients/invoices/create")
+@router.post("/ui/customers/invoices/create")
 def create_invoice(
-    client_id: int = Form(...),
+    customer_id: int = Form(...),
     invoice_no: str = Form(""),
-    description: str = Form(...),
-    quantity: float = Form(...),
-    unit_price: float = Form(...),
+    invoice_date: str = Form(""),
+    amount: float = Form(...),
     tax_percent: float = Form(14),
-    notes: str = Form("")
+    withholding_percent: float = Form(0),
+    notes: str = Form(""),
 ):
-    line_subtotal = float(quantity) * float(unit_price)
-    tax_value = line_subtotal * (float(tax_percent) / 100.0)
-    total = line_subtotal + tax_value
+    subtotal = safe_float(amount)
+    tax_value = subtotal * (safe_float(tax_percent) / 100.0)
+    withholding_value = subtotal * (safe_float(withholding_percent) / 100.0)
+    total = subtotal + tax_value - withholding_value
 
     conn = get_conn()
-    cur = conn.cursor()
+    final_invoice_no = invoice_no.strip() if invoice_no.strip() else next_invoice_no(conn)
 
+    cur = conn.cursor()
     cur.execute("""
         INSERT INTO invoices (
-            client_id, invoice_no, subtotal, tax_percent, tax_value, total, paid_amount, status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            client_id, invoice_no, invoice_date, subtotal, tax_percent, tax_value,
+            withholding_percent, withholding_value, total, paid_amount, status, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        client_id,
-        invoice_no.strip(),
-        line_subtotal,
+        customer_id,
+        final_invoice_no,
+        invoice_date or None,
+        subtotal,
         tax_percent,
         tax_value,
+        withholding_percent,
+        withholding_value,
         total,
         0,
-        "unpaid",
-        notes
+        "draft",
+        notes,
     ))
-
     invoice_id = cur.lastrowid
-
-    cur.execute("""
-        INSERT INTO invoice_lines (
-            invoice_id, description, quantity, unit_price, line_subtotal
-        ) VALUES (?, ?, ?, ?, ?)
-    """, (
-        invoice_id,
-        description,
-        quantity,
-        unit_price,
-        line_subtotal
-    ))
 
     conn.commit()
     conn.close()
 
-    return RedirectResponse(f"/ui/clients/invoices/{invoice_id}", status_code=303)
+    return RedirectResponse(f"/ui/customers/invoices/{invoice_id}", status_code=303)
 
 
-@router.get("/ui/clients/invoices/{invoice_id}", response_class=HTMLResponse)
+@router.get("/ui/customers/invoices/{invoice_id}", response_class=HTMLResponse)
 def invoice_view(invoice_id: int, request: Request):
     user = current_user(request)
     if not user:
-        return RedirectResponse(url="/login", status_code=302)
+        return RedirectResponse("/login", status_code=302)
 
     conn = get_conn()
 
     invoice = conn.execute("""
-        SELECT invoices.*, clients.name AS client_name, clients.phone AS client_phone, clients.email AS client_email
+        SELECT invoices.*, clients.name AS customer_name
         FROM invoices
         LEFT JOIN clients ON clients.id = invoices.client_id
         WHERE invoices.id = ?
     """, (invoice_id,)).fetchone()
 
-    lines = conn.execute("""
-        SELECT * FROM invoice_lines WHERE invoice_id = ?
-    """, (invoice_id,)).fetchall()
+    if not invoice:
+        conn.close()
+        return RedirectResponse("/ui/customers", status_code=303)
 
     payments = conn.execute("""
-        SELECT * FROM payments WHERE invoice_id = ? ORDER BY id DESC
+        SELECT * FROM payments
+        WHERE invoice_id = ?
+        ORDER BY id DESC
     """, (invoice_id,)).fetchall()
 
-    conn.close()
+    entry = conn.execute("""
+        SELECT * FROM journal_entries
+        WHERE reference_type = 'customer_invoice' AND reference_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (invoice_id,)).fetchone()
 
-    if not invoice:
-        return RedirectResponse("/ui/clients", status_code=303)
-
-    line_rows = ""
-    for line in lines:
-        line_rows += f"""
-        <tr>
-            <td>{line["description"] or ""}</td>
-            <td>{float(line["quantity"] or 0):.2f}</td>
-            <td>{float(line["unit_price"] or 0):.2f}</td>
-            <td>{float(line["line_subtotal"] or 0):.2f}</td>
-        </tr>
-        """
+    due = safe_float(invoice["total"]) - safe_float(invoice["paid_amount"])
 
     payment_rows = ""
     for p in payments:
         payment_rows += f"""
         <tr>
-            <td>{p["id"]}</td>
-            <td>{float(p["amount"] or 0):.2f}</td>
-            <td>{p["payment_date"]}</td>
+            <td style="padding:12px;">{p["payment_date"] or "-"}</td>
+            <td style="padding:12px;">{p["payment_method"] or "cash"}</td>
+            <td style="padding:12px;">{safe_float(p["amount"]):.2f}</td>
         </tr>
         """
 
-    due_amount = float(invoice["total"] or 0) - float(invoice["paid_amount"] or 0)
+    entry_html = f"<div><b>Entry No:</b> {entry['entry_no']}</div>" if entry else "<div><b>Entry No:</b> -</div>"
+
+    conn.close()
 
     content = f"""
-        <h1 class="page-title">Invoice {invoice["invoice_no"] or f"INV-{invoice['id']:05d}"}</h1>
-        <div class="page-subtitle">Client: {invoice["client_name"] or "-"}</div>
+    <h1 class="page-title">Invoice</h1>
+    <div class="page-subtitle">{invoice["invoice_no"] or "-"}</div>
 
-        <div class="stat-grid">
-            <div class="stat-card">
-                <div class="stat-label">Subtotal</div>
-                <div class="stat-value">{float(invoice["subtotal"] or 0):.2f}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Tax</div>
-                <div class="stat-value">{float(invoice["tax_value"] or 0):.2f}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Total</div>
-                <div class="stat-value">{float(invoice["total"] or 0):.2f}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Due</div>
-                <div class="stat-value">{due_amount:.2f}</div>
-            </div>
-        </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px;">
+        <form method="post" action="/ui/customers/invoices/{invoice_id}/confirm">
+            <button class="btn-primary" type="submit">Confirm</button>
+        </form>
 
-        <div class="two-cols">
+        <form method="post" action="/ui/customers/pay" style="display:flex; gap:10px; flex-wrap:wrap;">
+            <input type="hidden" name="invoice_id" value="{invoice_id}">
+            <input type="number" step="0.01" name="amount" placeholder="Amount" required>
+            <select name="payment_method">
+                <option value="cash">Cash</option>
+                <option value="bank">Bank</option>
+            </select>
+            <button class="btn-primary" type="submit">Register Payment</button>
+        </form>
+    </div>
 
-            <div>
-                <div class="panel" style="margin-bottom:22px;">
-                    <div class="panel-header">
-                        <div class="panel-title">Invoice Details</div>
-                    </div>
-                    <div class="panel-body">
-                        <div><b>Invoice No:</b> {invoice["invoice_no"] or f"INV-{invoice['id']:05d}"}</div>
-                        <div style="margin-top:8px;"><b>Date:</b> {invoice["invoice_date"]}</div>
-                        <div style="margin-top:8px;"><b>Client:</b> {invoice["client_name"] or "-"}</div>
-                        <div style="margin-top:8px;"><b>Phone:</b> {invoice["client_phone"] or "-"}</div>
-                        <div style="margin-top:8px;"><b>Email:</b> {invoice["client_email"] or "-"}</div>
-                        <div style="margin-top:8px;"><b>Tax %:</b> {float(invoice["tax_percent"] or 0):.2f}</div>
-                        <div style="margin-top:8px;"><b>Status:</b> {invoice["status"]}</div>
-                        <div style="margin-top:8px;"><b>Notes:</b> {invoice["notes"] or "-"}</div>
-                    </div>
-                </div>
+    <div class="dashboard-grid" style="margin-bottom:18px;">
+        <div class="card"><div class="card-title">Customer</div><div class="card-value" style="font-size:20px;">{invoice["customer_name"] or "-"}</div></div>
+        <div class="card"><div class="card-title">Total</div><div class="card-value">{safe_float(invoice["total"]):.2f}</div></div>
+        <div class="card"><div class="card-title">Paid</div><div class="card-value">{safe_float(invoice["paid_amount"]):.2f}</div></div>
+        <div class="card"><div class="card-title">Due</div><div class="card-value">{due:.2f}</div></div>
+    </div>
 
-                <div class="panel">
-                    <div class="panel-header">
-                        <div class="panel-title">Register Payment</div>
-                    </div>
-                    <div class="panel-body">
-                        <form method="post" action="/ui/clients/pay" class="form-grid">
-                            <input type="hidden" name="invoice_id" value="{invoice["id"]}">
-                            <div class="form-group">
-                                <label>Amount</label>
-                                <input name="amount" type="number" step="0.01" required>
-                            </div>
-                            <button class="btn btn-success" type="submit">Save Payment</button>
-                        </form>
-                    </div>
-                </div>
-            </div>
+    <div class="card" style="margin-bottom:18px;">
+        <h2 style="margin-bottom:14px;">Journal Entry</h2>
+        {entry_html}
+    </div>
 
-            <div>
-                <div class="panel" style="margin-bottom:22px;">
-                    <div class="panel-header">
-                        <div class="panel-title">Invoice Lines</div>
-                    </div>
-                    <div class="panel-body table-wrap">
-                        <table class="erp-table">
-                            <thead>
-                                <tr>
-                                    <th>Description</th>
-                                    <th>Qty</th>
-                                    <th>Unit Price</th>
-                                    <th>Subtotal</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {line_rows}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-header">
-                        <div class="panel-title">Payments</div>
-                    </div>
-                    <div class="panel-body table-wrap">
-                        <table class="erp-table">
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Amount</th>
-                                    <th>Date</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {payment_rows}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-        </div>
+    <div class="card">
+        <h2 style="margin-bottom:14px;">Payments</h2>
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+                <tr>
+                    <th style="text-align:left; padding:12px;">Date</th>
+                    <th style="text-align:left; padding:12px;">Method</th>
+                    <th style="text-align:left; padding:12px;">Amount</th>
+                </tr>
+            </thead>
+            <tbody>
+                {payment_rows if payment_rows else '<tr><td colspan="3" style="padding:12px;">No payments</td></tr>'}
+            </tbody>
+        </table>
+    </div>
     """
 
-    return HTMLResponse(render_page("Clients", "clients", content, user["username"]))
+    return HTMLResponse(render_page("Invoice", "dashboard", content, user["username"], "en"))
 
 
-@router.post("/ui/clients/add")
-def add_client(
-    name: str = Form(...),
-    phone: str = Form(""),
-    email: str = Form(""),
-    address: str = Form(""),
-    notes: str = Form("")
-):
+@router.post("/ui/customers/invoices/{invoice_id}/confirm")
+def confirm_invoice(invoice_id: int):
     conn = get_conn()
-    conn.execute(
-        "INSERT INTO clients (name, phone, email, address, notes) VALUES (?, ?, ?, ?, ?)",
-        (name, phone, email, address, notes)
+    ensure_accounting_tables(conn)
+
+    invoice = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+    if not invoice:
+        conn.close()
+        return RedirectResponse("/ui/customers", status_code=303)
+
+    ar_acc = get_account_id_by_code(conn, "1100")
+    wht_acc = get_account_id_by_code(conn, "1110")
+    vat_acc = get_account_id_by_code(conn, "2100")
+    sales_acc = get_account_id_by_code(conn, "4000")
+
+    subtotal = safe_float(invoice["subtotal"])
+    tax_value = safe_float(invoice["tax_value"])
+    withholding_value = safe_float(invoice["withholding_value"])
+    total = safe_float(invoice["total"])
+
+    lines = []
+    if ar_acc and total > 0:
+        lines.append({"account_id": ar_acc, "debit": total, "credit": 0, "line_description": "Accounts Receivable"})
+    if wht_acc and withholding_value > 0:
+        lines.append({"account_id": wht_acc, "debit": withholding_value, "credit": 0, "line_description": "Withholding Tax Receivable"})
+    if sales_acc and subtotal > 0:
+        lines.append({"account_id": sales_acc, "debit": 0, "credit": subtotal, "line_description": "Sales Revenue"})
+    if vat_acc and tax_value > 0:
+        lines.append({"account_id": vat_acc, "debit": 0, "credit": tax_value, "line_description": "Output VAT"})
+
+    post_journal_entry(
+        conn,
+        invoice["invoice_date"] or "",
+        f"Customer Invoice {invoice['invoice_no'] or invoice_id}",
+        "customer_invoice",
+        invoice_id,
+        lines,
     )
-    conn.commit()
-    conn.close()
-    return RedirectResponse("/ui/clients", status_code=303)
 
-
-@router.post("/ui/clients/pay")
-def pay(invoice_id: int = Form(...), amount: float = Form(...)):
-    conn = get_conn()
-
-    invoice = conn.execute(
-        "SELECT * FROM invoices WHERE id = ?",
-        (invoice_id,)
-    ).fetchone()
-
-    if invoice:
-        new_paid = float(invoice["paid_amount"] or 0) + float(amount)
-        new_status = calc_invoice_status(float(invoice["total"] or 0), new_paid)
-
-        conn.execute(
-            "INSERT INTO payments (invoice_id, amount) VALUES (?, ?)",
-            (invoice_id, amount)
-        )
-
-        conn.execute(
-            "UPDATE invoices SET paid_amount = ?, status = ? WHERE id = ?",
-            (new_paid, new_status, invoice_id)
-        )
-
+    conn.execute("UPDATE invoices SET status = 'confirmed' WHERE id = ?", (invoice_id,))
     conn.commit()
     conn.close()
 
-    return RedirectResponse(f"/ui/clients/invoices/{invoice_id}", status_code=303)
+    return RedirectResponse(f"/ui/customers/invoices/{invoice_id}", status_code=303)
 
 
-@router.get("/ui/clients/edit/{client_id}", response_class=HTMLResponse)
-def edit_client_page(client_id: int, request: Request):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse(url="/login", status_code=302)
-
-    conn = get_conn()
-    client = conn.execute(
-        "SELECT * FROM clients WHERE id = ?",
-        (client_id,)
-    ).fetchone()
-    conn.close()
-
-    if not client:
-        return RedirectResponse("/ui/clients", status_code=303)
-
-    content = f"""
-        <h1 class="page-title">Edit Client</h1>
-        <div class="page-subtitle">Update client information</div>
-
-        <div class="panel" style="max-width:700px;">
-            <div class="panel-header">
-                <div class="panel-title">Client #{client["id"]}</div>
-            </div>
-            <div class="panel-body">
-                <form method="post" action="/ui/clients/edit/{client["id"]}" class="form-grid">
-                    <div class="form-group">
-                        <label>Name</label>
-                        <input name="name" value="{client["name"] or ""}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Phone</label>
-                        <input name="phone" value="{client["phone"] or ""}">
-                    </div>
-                    <div class="form-group">
-                        <label>Email</label>
-                        <input name="email" value="{client["email"] or ""}">
-                    </div>
-                    <div class="form-group">
-                        <label>Address</label>
-                        <input name="address" value="{client["address"] or ""}">
-                    </div>
-                    <div class="form-group">
-                        <label>Notes</label>
-                        <textarea name="notes" rows="4">{client["notes"] or ""}</textarea>
-                    </div>
-
-                    <div style="display:flex; gap:12px;">
-                        <button class="btn btn-primary" type="submit">Save Changes</button>
-                        <a class="btn btn-light" href="/ui/clients">Back</a>
-                    </div>
-                </form>
-            </div>
-        </div>
-    """
-
-    return HTMLResponse(render_page("Clients", "clients", content, user["username"]))
-
-
-@router.post("/ui/clients/edit/{client_id}")
-def edit_client_save(
-    client_id: int,
-    name: str = Form(...),
-    phone: str = Form(""),
-    email: str = Form(""),
-    address: str = Form(""),
-    notes: str = Form("")
+@router.post("/ui/customers/pay")
+def register_payment(
+    invoice_id: int = Form(...),
+    amount: float = Form(...),
+    payment_method: str = Form("cash"),
 ):
     conn = get_conn()
+    ensure_accounting_tables(conn)
+
+    invoice = conn.execute("SELECT * FROM invoices WHERE id = ?", (invoice_id,)).fetchone()
+    if not invoice:
+        conn.close()
+        return RedirectResponse("/ui/customers", status_code=303)
+
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO payments (invoice_id, amount, payment_method)
+        VALUES (?, ?, ?)
+    """, (invoice_id, amount, payment_method))
+    payment_id = cur.lastrowid
+
+    new_paid = safe_float(invoice["paid_amount"]) + safe_float(amount)
+    new_status = calc_status(safe_float(invoice["total"]), new_paid)
+
     conn.execute("""
-        UPDATE clients
-        SET name = ?, phone = ?, email = ?, address = ?, notes = ?
+        UPDATE invoices
+        SET paid_amount = ?, status = ?
         WHERE id = ?
-    """, (name, phone, email, address, notes, client_id))
+    """, (new_paid, new_status, invoice_id))
+
+    cash_acc = get_account_id_by_code(conn, "1001" if payment_method == "cash" else "1002")
+    ar_acc = get_account_id_by_code(conn, "1100")
+
+    if cash_acc and ar_acc:
+        post_journal_entry(
+            conn,
+            invoice["invoice_date"] or "",
+            f"Customer Payment {invoice['invoice_no'] or invoice_id}",
+            "customer_payment",
+            payment_id,
+            [
+                {"account_id": cash_acc, "debit": safe_float(amount), "credit": 0, "line_description": "Cash/Bank"},
+                {"account_id": ar_acc, "debit": 0, "credit": safe_float(amount), "line_description": "Accounts Receivable"},
+            ],
+        )
+
     conn.commit()
     conn.close()
 
-    return RedirectResponse("/ui/clients", status_code=303)
+    return RedirectResponse(f"/ui/customers/invoices/{invoice_id}", status_code=303)
