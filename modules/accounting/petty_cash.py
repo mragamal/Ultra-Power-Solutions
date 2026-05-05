@@ -675,7 +675,12 @@ def sync_petty_cash_movement_status(conn, table_name: str, row):
     if status in ("reversed", "cancelled"):
         return
     journal_status = get_linked_journal_status(conn, row["journal_id"])
-    new_status = "posted" if journal_status == "posted" else "draft"
+    if journal_status == "posted":
+        new_status = "posted"
+    elif journal_status == "pending_final_post":
+        new_status = "pending_final_post"
+    else:
+        new_status = "draft"
     if status != new_status:
         conn.execute(f"UPDATE {table_name} SET status = ? WHERE id = ?", (new_status, row["id"]))
 
@@ -684,18 +689,49 @@ def movement_display_status(conn, row) -> str:
     status = safe(row["status"]).lower()
     if status in ("reversed", "cancelled"):
         return status
-    return "posted" if get_linked_journal_status(conn, row["journal_id"]) == "posted" else "draft"
+    journal_status = get_linked_journal_status(conn, row["journal_id"])
+    if journal_status == "posted":
+        return "posted"
+    if journal_status == "pending_final_post":
+        return "pending_final_post"
+    return "draft"
 
 
-def petty_cash_row_actions(lang, path: str, row) -> str:
+def petty_cash_row_actions(lang, path: str, row, conn=None) -> str:
     row_id = int(row["id"] or 0)
+    journal_status = get_linked_journal_status(conn, row["journal_id"]) if conn else ""
+    send_action = ""
+    if journal_status in ("", "draft"):
+        send_action = f"""
+        <form method="post" action="/ui/accounting/petty-cash/{path}/{row_id}/post" style="display:inline;">
+            <button class="btn green" type="submit">{L(lang, "Send to Journal", "ترحيل للجورنال")}</button>
+        </form>
+        """
     return f"""
         <a class="btn blue" href="/ui/accounting/petty-cash/{path}/{row_id}">{L(lang, "Open", "فتح")}</a>
+        {send_action}
         <a class="btn orange" href="/ui/accounting/petty-cash/{path}/{row_id}/edit">{L(lang, "Edit", "تعديل")}</a>
         <form method="post" action="/ui/accounting/petty-cash/{path}/{row_id}/delete" style="display:inline;" onsubmit="return confirm('{L(lang, "Delete this movement?", "هل تريد حذف هذه الحركة؟")}');">
             <button class="btn red" type="submit">{L(lang, "Delete", "حذف")}</button>
         </form>
     """
+
+
+def send_petty_cash_movement_to_journal(conn, table_name: str, row, create_journal_func, movement_id: int):
+    if not row:
+        raise Exception("Movement not found.")
+    if not movement_can_modify(conn, row):
+        raise Exception("Final posted movement cannot be sent from here.")
+    journal_status = get_linked_journal_status(conn, row["journal_id"])
+    if journal_status == "posted":
+        raise Exception("Final posted movement cannot be sent from here.")
+    if not row["journal_id"]:
+        create_journal_func(conn, movement_id)
+        row = conn.execute(f"SELECT * FROM {table_name} WHERE id = ? LIMIT 1", (movement_id,)).fetchone()
+        journal_status = get_linked_journal_status(conn, row["journal_id"])
+    if journal_status in ("", "draft"):
+        submit_journal_for_final_post(conn, row["journal_id"])
+    conn.execute(f"UPDATE {table_name} SET status = 'pending_final_post' WHERE id = ?", (movement_id,))
 
 
 def custody_request_has_disbursement(conn, request_id: int) -> bool:
@@ -1158,7 +1194,7 @@ def petty_cash_home(request: Request):
     body_custody = ""
     for r in custody_rows:
         sync_petty_cash_movement_status(conn, "petty_cash_custody", r)
-        actions = petty_cash_row_actions(lang, "custody", r) if movement_can_modify(conn, r) else f'<a class="btn blue" href="/ui/accounting/petty-cash/custody/{r["id"]}">{L(lang, "Open", "فتح")}</a>'
+        actions = petty_cash_row_actions(lang, "custody", r, conn) if movement_can_modify(conn, r) else f'<a class="btn blue" href="/ui/accounting/petty-cash/custody/{r["id"]}">{L(lang, "Open", "فتح")}</a>'
         body_custody += f"""
         <tr>
             <td>{r['custody_no'] or ''}</td>
@@ -1253,7 +1289,7 @@ def petty_cash_home(request: Request):
     body_return = ""
     for r in return_rows:
         sync_petty_cash_movement_status(conn, "petty_cash_return", r)
-        actions = petty_cash_row_actions(lang, "return", r) if movement_can_modify(conn, r) else f'<a class="btn blue" href="/ui/accounting/petty-cash/return/{r["id"]}">{L(lang, "Open", "فتح")}</a>'
+        actions = petty_cash_row_actions(lang, "return", r, conn) if movement_can_modify(conn, r) else f'<a class="btn blue" href="/ui/accounting/petty-cash/return/{r["id"]}">{L(lang, "Open", "فتح")}</a>'
         body_return += f"""
         <tr>
             <td>{r['return_no'] or ''}</td>
@@ -1273,7 +1309,7 @@ def petty_cash_home(request: Request):
     body_transfer = ""
     for r in transfer_rows:
         sync_petty_cash_movement_status(conn, "petty_cash_transfer", r)
-        actions = petty_cash_row_actions(lang, "transfer", r) if movement_can_modify(conn, r) else f'<a class="btn blue" href="/ui/accounting/petty-cash/transfer/{r["id"]}">{L(lang, "Open", "فتح")}</a>'
+        actions = petty_cash_row_actions(lang, "transfer", r, conn) if movement_can_modify(conn, r) else f'<a class="btn blue" href="/ui/accounting/petty-cash/transfer/{r["id"]}">{L(lang, "Open", "فتح")}</a>'
         body_transfer += f"""
         <tr>
             <td>{r['transfer_no'] or ''}</td>
@@ -2090,7 +2126,7 @@ def open_custody(request: Request, custody_id: int):
         <p><b>{L(lang, "Reverse Journal ID", "رقم قيد العكس")}:</b> {row['reversed_journal_id'] or ''}</p>
 
         <div style="margin-top:20px;">
-            {petty_cash_row_actions(lang, "custody", row) if movement_can_modify(conn, row) else ""}
+            {petty_cash_row_actions(lang, "custody", row, conn) if movement_can_modify(conn, row) else ""}
             <a class="btn gray" href="/ui/accounting/petty-cash">{L(lang, "Back", "رجوع")}</a>
         </div>
     </div>
@@ -2184,7 +2220,17 @@ def delete_custody(custody_id: int):
 
 @router.post("/ui/accounting/petty-cash/custody/{custody_id}/post")
 def post_custody(custody_id: int):
-    return HTMLResponse("Post is allowed from Journal screen only.", status_code=400)
+    conn = get_conn()
+    try:
+        row = get_custody(conn, custody_id)
+        send_petty_cash_movement_to_journal(conn, "petty_cash_custody", row, create_draft_journal_for_custody, custody_id)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return HTMLResponse(str(e), status_code=400)
+    conn.close()
+    return RedirectResponse(f"/ui/accounting/petty-cash/custody/{custody_id}", status_code=302)
 
 
 @router.post("/ui/accounting/petty-cash/custody/{custody_id}/reverse")
@@ -2355,7 +2401,7 @@ def open_return(request: Request, return_id: int):
         <p><b>{L(lang, "Reverse Journal ID", "رقم قيد العكس")}:</b> {row['reversed_journal_id'] or ''}</p>
 
         <div style="margin-top:20px;">
-            {petty_cash_row_actions(lang, "return", row) if movement_can_modify(conn, row) else ""}
+            {petty_cash_row_actions(lang, "return", row, conn) if movement_can_modify(conn, row) else ""}
             <a class="btn gray" href="/ui/accounting/petty-cash">{L(lang, "Back", "رجوع")}</a>
         </div>
     </div>
@@ -2585,7 +2631,7 @@ def open_transfer(request: Request, transfer_id: int):
         <p><b>{L(lang, "Reverse Journal ID", "رقم قيد العكس")}:</b> {row['reversed_journal_id'] or ''}</p>
 
         <div style="margin-top:20px;">
-            {petty_cash_row_actions(lang, "transfer", row) if movement_can_modify(conn, row) else ""}
+            {petty_cash_row_actions(lang, "transfer", row, conn) if movement_can_modify(conn, row) else ""}
             <a class="btn gray" href="/ui/accounting/petty-cash">{L(lang, "Back", "رجوع")}</a>
         </div>
     </div>
@@ -2683,7 +2729,17 @@ def delete_transfer(transfer_id: int):
 
 @router.post("/ui/accounting/petty-cash/transfer/{transfer_id}/post")
 def post_transfer(transfer_id: int):
-    return HTMLResponse("Post is allowed from Journal screen only.", status_code=400)
+    conn = get_conn()
+    try:
+        row = get_transfer(conn, transfer_id)
+        send_petty_cash_movement_to_journal(conn, "petty_cash_transfer", row, create_draft_journal_for_transfer, transfer_id)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return HTMLResponse(str(e), status_code=400)
+    conn.close()
+    return RedirectResponse(f"/ui/accounting/petty-cash/transfer/{transfer_id}", status_code=302)
 
 
 @router.post("/ui/accounting/petty-cash/transfer/{transfer_id}/reverse")
@@ -2717,7 +2773,17 @@ def reverse_transfer(transfer_id: int):
 
 @router.post("/ui/accounting/petty-cash/return/{return_id}/post")
 def post_return(return_id: int):
-    return HTMLResponse("Post is allowed from Journal screen only.", status_code=400)
+    conn = get_conn()
+    try:
+        row = get_return(conn, return_id)
+        send_petty_cash_movement_to_journal(conn, "petty_cash_return", row, create_draft_journal_for_return, return_id)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return HTMLResponse(str(e), status_code=400)
+    conn.close()
+    return RedirectResponse(f"/ui/accounting/petty-cash/return/{return_id}", status_code=302)
 
 
 @router.post("/ui/accounting/petty-cash/return/{return_id}/reverse")
