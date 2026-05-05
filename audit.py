@@ -3,6 +3,18 @@ from datetime import datetime
 from html import escape
 
 
+def _table_columns(conn, table_name: str) -> set[str]:
+    try:
+        return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _ensure_column(conn, table_name: str, column_name: str, column_sql: str):
+    if column_name not in _table_columns(conn, table_name):
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_sql}")
+
+
 def ensure_audit_table():
     conn = get_conn()
 
@@ -17,21 +29,44 @@ def ensure_audit_table():
             done_at TEXT NOT NULL
         )
     """)
+    _ensure_column(conn, "audit_log", "user_id", "user_id INTEGER")
+    _ensure_column(conn, "audit_log", "username", "username TEXT")
+    _ensure_column(conn, "audit_log", "module", "module TEXT")
+    _ensure_column(conn, "audit_log", "path", "path TEXT")
+    _ensure_column(conn, "audit_log", "method", "method TEXT")
+    _ensure_column(conn, "audit_log", "ip_address", "ip_address TEXT")
+    _ensure_column(conn, "audit_log", "status_code", "status_code INTEGER")
 
     conn.commit()
     conn.close()
 
 
-def log_action(entity_type: str, entity_id: int, action: str, done_by: str = "admin", notes: str = "", conn=None, done_at: str | None = None):
+def log_action(
+    entity_type: str,
+    entity_id: int,
+    action: str,
+    done_by: str = "admin",
+    notes: str = "",
+    conn=None,
+    done_at: str | None = None,
+    user_id: int | None = None,
+    username: str = "",
+    module: str = "",
+    path: str = "",
+    method: str = "",
+    ip_address: str = "",
+    status_code: int | None = None,
+):
     own_conn = conn is None
     if conn is None:
         conn = get_conn()
 
     conn.execute("""
         INSERT INTO audit_log (
-            entity_type, entity_id, action, notes, done_by, done_at
+            entity_type, entity_id, action, notes, done_by, done_at,
+            user_id, username, module, path, method, ip_address, status_code
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         entity_type,
         entity_id,
@@ -39,6 +74,13 @@ def log_action(entity_type: str, entity_id: int, action: str, done_by: str = "ad
         notes,
         done_by,
         done_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        user_id,
+        username,
+        module,
+        path,
+        method,
+        ip_address,
+        status_code,
     ))
 
     if own_conn:
@@ -77,7 +119,112 @@ def actor_name_from_request(request, fallback: str = "System") -> str:
     )
 
 
-def safe_log_action(entity_type: str, entity_id: int, action: str, done_by: str = "System", notes: str = "", conn=None, done_at: str | None = None):
+def actor_info_from_request(request, fallback: str = "System") -> dict:
+    try:
+        from auth import current_user
+        user = current_user(request)
+    except Exception:
+        user = None
+
+    if not user:
+        return {
+            "done_by": fallback,
+            "user_id": None,
+            "username": "",
+        }
+
+    username = (user.get("username") or "").strip()
+    done_by = (user.get("full_name") or "").strip() or username or fallback
+    return {
+        "done_by": done_by,
+        "user_id": user.get("user_id"),
+        "username": username,
+    }
+
+
+def request_ip_address(request) -> str:
+    try:
+        forwarded = request.headers.get("x-forwarded-for") or ""
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.client.host if request.client else ""
+    except Exception:
+        return ""
+
+
+def log_request_action(
+    request,
+    entity_type: str,
+    entity_id: int,
+    action: str,
+    notes: str = "",
+    conn=None,
+    done_at: str | None = None,
+    module: str = "",
+    status_code: int | None = None,
+):
+    actor = actor_info_from_request(request)
+    log_action(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        action=action,
+        done_by=actor["done_by"],
+        notes=notes,
+        conn=conn,
+        done_at=done_at,
+        user_id=actor["user_id"],
+        username=actor["username"],
+        module=module,
+        path=request.scope.get("original_path") or request.url.path,
+        method=request.method,
+        ip_address=request_ip_address(request),
+        status_code=status_code,
+    )
+
+
+def safe_log_request_action(
+    request,
+    entity_type: str,
+    entity_id: int,
+    action: str,
+    notes: str = "",
+    conn=None,
+    done_at: str | None = None,
+    module: str = "",
+    status_code: int | None = None,
+):
+    try:
+        log_request_action(
+            request=request,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            action=action,
+            notes=notes,
+            conn=conn,
+            done_at=done_at,
+            module=module,
+            status_code=status_code,
+        )
+    except Exception:
+        pass
+
+
+def safe_log_action(
+    entity_type: str,
+    entity_id: int,
+    action: str,
+    done_by: str = "System",
+    notes: str = "",
+    conn=None,
+    done_at: str | None = None,
+    user_id: int | None = None,
+    username: str = "",
+    module: str = "",
+    path: str = "",
+    method: str = "",
+    ip_address: str = "",
+    status_code: int | None = None,
+):
     try:
         log_action(
             entity_type=entity_type,
@@ -87,6 +234,13 @@ def safe_log_action(entity_type: str, entity_id: int, action: str, done_by: str 
             notes=notes,
             conn=conn,
             done_at=done_at,
+            user_id=user_id,
+            username=username,
+            module=module,
+            path=path,
+            method=method,
+            ip_address=ip_address,
+            status_code=status_code,
         )
     except Exception:
         pass
@@ -107,7 +261,16 @@ def render_audit_log_card(entity_type: str, entity_id: int, title: str = "Activi
             notes = escape(str(row["notes"] or ""))
             done_by = escape(str(row["done_by"] or "System"))
             done_at = escape(str(row["done_at"] or ""))
+            username = escape(str(row["username"] or ""))
+            method = escape(str(row["method"] or ""))
+            path = escape(str(row["path"] or ""))
             note_html = f'<div class="audit-note">{notes}</div>' if notes else ""
+            user_html = f"By: {done_by}"
+            if username and username != done_by:
+                user_html += f" ({username})"
+            request_html = ""
+            if method or path:
+                request_html = f'<div class="audit-item-user">{method} {path}</div>'
             chunks.append(f"""
             <div class="audit-item">
                 <div class="audit-item-head">
@@ -115,7 +278,8 @@ def render_audit_log_card(entity_type: str, entity_id: int, title: str = "Activi
                     <div class="audit-item-meta">{done_at}</div>
                 </div>
                 {note_html}
-                <div class="audit-item-user">By: {done_by}</div>
+                <div class="audit-item-user">{user_html}</div>
+                {request_html}
             </div>
             """)
         items = "".join(chunks)

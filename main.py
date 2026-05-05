@@ -11,7 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, TimestampSigner
 from starlette.middleware.sessions import SessionMiddleware
 
-from auth import can, default_home_path_for_user, is_logged_in
+from auth import can, current_user, default_home_path_for_user, is_logged_in
+from audit import safe_log_request_action
 from db import init_db
 from i18n import get_lang
 from layout import render_page
@@ -137,6 +138,18 @@ def hydrate_session_from_cookie(request: Request):
         request.scope["session"] = {}
 
 
+def should_audit_request(path: str, method: str) -> bool:
+    path = path or ""
+    method = (method or "").upper()
+    if path.startswith(("/static", "/uploads", "/favicon.ico", "/api/assistant")):
+        return False
+    if method in {"POST", "PUT", "PATCH", "DELETE"}:
+        return True
+    if method == "GET" and path.endswith("/edit"):
+        return True
+    return False
+
+
 @app.middleware("http")
 async def auth_guard(request: Request, call_next):
     apply_company_path(request)
@@ -154,7 +167,21 @@ async def auth_guard(request: Request, call_next):
     if module_code and not can(request, module_code, "view"):
         return RedirectResponse(default_home_path_for_user(request), status_code=302)
 
-    return await call_next(request)
+    response = await call_next(request)
+    if should_audit_request(path, request.method):
+        user = current_user(request) or {}
+        user_id = int(user.get("user_id") or 0)
+        action = "Opened edit screen" if request.method.upper() == "GET" else f"{request.method.upper()} request"
+        safe_log_request_action(
+            request,
+            "system_activity",
+            user_id,
+            action,
+            notes=path,
+            module=module_code or "",
+            status_code=getattr(response, "status_code", None),
+        )
+    return response
 
 
 @app.middleware("http")

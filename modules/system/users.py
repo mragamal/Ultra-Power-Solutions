@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from db import get_conn
 from layout import render_page
+from audit import safe_log_action, safe_log_request_action
 from auth import (
     copy_role_permissions_to_user,
     default_home_path_for_user,
@@ -565,20 +566,69 @@ def login_submit(
     user = get_user_by_username((username or "").strip())
 
     if not user:
+        safe_log_action(
+            "system_activity",
+            0,
+            "Login failed",
+            (username or "").strip() or "Unknown user",
+            "Invalid username.",
+            path=request.scope.get("original_path") or request.url.path,
+            method=request.method,
+        )
         return HTMLResponse(render_login_page("Invalid username or password.", (username or "").strip(), _company_prefix(request)), status_code=400)
 
     if not bool(user["is_active"]):
+        safe_log_action(
+            "system_activity",
+            int(user["id"] or 0),
+            "Login failed",
+            user["full_name"] or user["username"] or "Unknown user",
+            "Inactive user.",
+            user_id=user["id"],
+            username=user["username"],
+            path=request.scope.get("original_path") or request.url.path,
+            method=request.method,
+        )
         return HTMLResponse(render_login_page("This user is inactive.", (username or "").strip(), _company_prefix(request)), status_code=400)
 
     if not verify_password(password, user["password_hash"]):
+        safe_log_action(
+            "system_activity",
+            int(user["id"] or 0),
+            "Login failed",
+            user["full_name"] or user["username"] or "Unknown user",
+            "Invalid password.",
+            user_id=user["id"],
+            username=user["username"],
+            path=request.scope.get("original_path") or request.url.path,
+            method=request.method,
+        )
         return HTMLResponse(render_login_page("Invalid username or password.", (username or "").strip(), _company_prefix(request)), status_code=400)
 
     login_user(request, user)
+    safe_log_request_action(
+        request,
+        "system_activity",
+        int(user["id"] or 0),
+        "Login",
+        "User logged in.",
+        module="system",
+    )
     return RedirectResponse(default_home_path_for_user(request), status_code=302)
 
 
 @router.get("/logout")
 def logout(request: Request):
+    user = current_user(request)
+    if user:
+        safe_log_request_action(
+            request,
+            "system_activity",
+            int(user.get("user_id") or 0),
+            "Logout",
+            "User logged out.",
+            module="system",
+        )
     logout_user(request)
     return RedirectResponse("/login", status_code=302)
 

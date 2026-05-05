@@ -1883,18 +1883,34 @@ def custody_request_open(request: Request, request_id: int):
         """
     related_activity_html = custody_request_related_activity(conn, request_id, lang)
     existing_log = conn.execute(
-        "SELECT id FROM audit_log WHERE entity_type = 'custody_request' AND entity_id = ? LIMIT 1",
+        "SELECT id, done_by, notes FROM audit_log WHERE entity_type = 'custody_request' AND entity_id = ? ORDER BY id LIMIT 1",
         (request_id,),
     ).fetchone()
+    current_actor = actor_name_from_request(request, "Unknown user")
     if not existing_log:
         safe_log_action(
             "custody_request",
             request_id,
             "Created",
-            "System",
-            f"Request {safe(row['request_no'])}, amount {money(row['amount'])}",
+            current_actor,
+            f"Request {safe(row['request_no'])}, amount {money(row['amount'])} (legacy record reconstructed)",
             conn=conn,
             done_at=safe(row["created_at"]) or None,
+        )
+        conn.commit()
+    elif safe(existing_log["done_by"]).strip().lower() == "system":
+        conn.execute(
+            """
+            UPDATE audit_log
+            SET done_by = ?,
+                notes = CASE
+                    WHEN notes IS NULL OR notes = '' THEN 'Legacy record reconstructed'
+                    WHEN instr(notes, 'legacy record reconstructed') > 0 THEN notes
+                    ELSE notes || ' (legacy record reconstructed)'
+                END
+            WHERE id = ?
+            """,
+            (current_actor, existing_log["id"]),
         )
         conn.commit()
     audit_html = render_audit_log_card("custody_request", request_id, L(lang, "Activity Log", "سجل النشاط"))
