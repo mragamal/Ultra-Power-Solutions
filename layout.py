@@ -57,7 +57,53 @@ def _request_lang(request, fallback="en"):
     return lang if lang in {"ar", "en"} else "en"
 
 
-def _with_lang_url(href, lang):
+def _company_prefix(request):
+    try:
+        prefix = request.scope.get("company_prefix") or request.scope.get("root_path") or ""
+    except Exception:
+        prefix = ""
+    prefix = str(prefix or "").strip()
+    if prefix and not prefix.startswith("/"):
+        prefix = "/" + prefix
+    return prefix.rstrip("/")
+
+
+def _company_name_from_request(request):
+    try:
+        slug = request.scope.get("company_slug") or ""
+    except Exception:
+        slug = ""
+    slug = str(slug or "").strip().lower()
+    names = {
+        "ultrapowersolutions": "Ultra Power Solutions",
+        "premiumeone": "Premium One",
+        "premiumone": "Premium One",
+        "premuimone": "Premium One",
+    }
+    if slug in names:
+        return names[slug]
+    if slug:
+        return slug.replace("-", " ").replace("_", " ").title()
+    return "Premium One"
+
+
+def _with_company_url(href, prefix):
+    if not href or not prefix:
+        return href
+    if href.startswith("#") or href.startswith("javascript:"):
+        return href
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    if href.startswith(("/static/", "/uploads/", "/favicon.ico")):
+        return href
+    if href == prefix or href.startswith(prefix + "/"):
+        return href
+    if href.startswith("/"):
+        return prefix + href
+    return href
+
+
+def _with_lang_url(href, lang, prefix=""):
     if not href or href.startswith("#") or href.startswith("javascript:"):
         return href
     if href.startswith("http://") or href.startswith("https://") or href.startswith("/static/"):
@@ -69,9 +115,10 @@ def _with_lang_url(href, lang):
             query["lang"] = "ar"
         else:
             query.pop("lang", None)
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+        url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+        return _with_company_url(url, prefix)
     except Exception:
-        return href
+        return _with_company_url(href, prefix)
 
 
 def _request_from_stack():
@@ -87,6 +134,7 @@ def _request_from_stack():
 
 def _sidebar_menu_items(request, current_path="", lang=None):
     lang = _request_lang(request, lang or "en")
+    prefix = _company_prefix(request)
 
     items = [
         ("accounting", "/ui/accounting", "/static/icons/nav-accounting.svg", "Accounting"),
@@ -104,7 +152,7 @@ def _sidebar_menu_items(request, current_path="", lang=None):
         if not visible:
             continue
         
-        full_href = _with_lang_url(href, lang)
+        full_href = _with_lang_url(href, lang, prefix)
         display_label = _NAV_LABELS_AR.get(label, label) if lang == "ar" else label
         
         if module_code == "operations":
@@ -145,10 +193,12 @@ def _module_home_link(current_path: str):
 def render_page(title, content, lang="en", current_path=""):
     request = _request_from_stack()
     lang = _request_lang(request, lang)
+    company_prefix = _company_prefix(request)
+    company_name = _company_name_from_request(request)
     title = _repair_arabic_mojibake(str(title or ""))
     content = _repair_arabic_mojibake(str(content or ""))
     sidebar_items_html = _sidebar_menu_items(request, current_path, lang)
-    module_home_href = _with_lang_url(_module_home_link(current_path), lang)
+    module_home_href = _with_lang_url(_module_home_link(current_path), lang, company_prefix)
     show_module_back = bool(module_home_href and current_path and current_path != module_home_href)
     module_back_label = "الرجوع للموديول" if lang == "ar" else "Back to Module"
     language_label = "English" if lang == "ar" else "عربي"
@@ -159,15 +209,17 @@ def render_page(title, content, lang="en", current_path=""):
     assistant_send = "إرسال" if lang == "ar" else "Send"
     done_label = "تم." if lang == "ar" else "Done."
     failed_label = "حصل خطأ، حاول مرة أخرى." if lang == "ar" else "Something went wrong. Try again."
-    home_href = _with_lang_url("/", lang)
-    logo_href = _with_lang_url("/ui/accounting", lang)
+    home_href = _with_lang_url("/", lang, company_prefix)
+    logout_href = _with_lang_url("/logout", lang, company_prefix)
+    assistant_chat_href = _with_company_url("/ui/assistant/chat", company_prefix)
+    logo_href = _with_lang_url("/ui/accounting", lang, company_prefix)
     return f"""
     <!DOCTYPE html>
     <html lang="{lang if lang in ['en', 'ar'] else 'en'}" dir="{'rtl' if lang == 'ar' else 'ltr'}">
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>{title}</title>
+        <title>{title} | {company_name}</title>
         <style>
             * {{
                 margin: 0;
@@ -266,6 +318,18 @@ def render_page(title, content, lang="en", current_path=""):
                 margin-left: -13%;
                 object-fit: contain;
                 filter: drop-shadow(0 8px 18px rgba(0,0,0,0.22));
+            }}
+            .company-name {{
+                display: inline-flex;
+                justify-content: center;
+                max-width: 100%;
+                color: #ffffff;
+                font-size: 17px;
+                font-weight: 900;
+                line-height: 1.25;
+                text-align: center;
+                margin: 0 auto 4px auto;
+                text-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
             }}
             .logo-title {{
                 font-size: 0px;
@@ -1554,6 +1618,7 @@ def render_page(title, content, lang="en", current_path=""):
                 <div class="logo-box">
                     <a class="logo-link" href="{logo_href}">
                         <img src="/static/logo6.png" alt="System Logo" class="logo-img">
+                        <div class="company-name">{company_name}</div>
                         <div class="logo-title">ULTRA POWER</div>
                         <div class="logo-sub">Premium One</div>
                     </a>
@@ -1569,7 +1634,7 @@ def render_page(title, content, lang="en", current_path=""):
                         {'<a class="topbar-link secondary" href="' + module_home_href + '" id="moduleBackLink">' + module_back_label + '</a>' if show_module_back else ''}
                         <button class="topbar-link secondary" type="button" id="langToggleBtn">{language_label}</button>
                         <a class="topbar-link" href="{home_href}" id="homeLink">{home_label}</a>
-                        <a class="topbar-link secondary" href="/logout" id="logoutLink">{logout_label}</a>
+                        <a class="topbar-link secondary" href="{logout_href}" id="logoutLink">{logout_label}</a>
                         <div class="topbar-badge"><img src="/static/icons/nav-notification.svg" alt="Alerts"></div>
                     </div>
                 </div>
@@ -1593,10 +1658,30 @@ def render_page(title, content, lang="en", current_path=""):
         <script>
             window.erpCurrentPath = {json.dumps(current_path or "")};
             window.erpUiLang = {json.dumps(lang)};
+            window.erpCompanyPrefix = {json.dumps(company_prefix)};
             try {{
                 localStorage.setItem('ui_lang', window.erpUiLang);
                 document.cookie = 'ui_lang=' + window.erpUiLang + '; path=/; max-age=31536000; SameSite=Lax';
             }} catch (e) {{}}
+
+            function erpCompanyUrl(url) {{
+                const prefix = window.erpCompanyPrefix || '';
+                if (!prefix || !url || url[0] !== '/' || url.indexOf(prefix + '/') === 0) return url;
+                if (url.indexOf('/static/') === 0 || url.indexOf('/uploads/') === 0 || url.indexOf('/favicon.ico') === 0) return url;
+                return prefix + url;
+            }}
+
+            function applyCompanyPrefixToPageLinks() {{
+                document.querySelectorAll('a[href]').forEach(function(link) {{
+                    const href = link.getAttribute('href') || '';
+                    link.setAttribute('href', erpCompanyUrl(href));
+                }});
+                document.querySelectorAll('form[action]').forEach(function(form) {{
+                    const action = form.getAttribute('action') || '';
+                    form.setAttribute('action', erpCompanyUrl(action));
+                }});
+            }}
+
             window.closePageModal = function() {{
                 document.querySelectorAll('[data-page-modal]').forEach(function(el) {{
                     el.remove();
@@ -1616,6 +1701,7 @@ def render_page(title, content, lang="en", current_path=""):
             }}
 
             document.addEventListener('DOMContentLoaded', function() {{
+                applyCompanyPrefixToPageLinks();
                 const toggleBtn = document.getElementById('langToggleBtn');
                 if (toggleBtn) {{
                     toggleBtn.addEventListener('click', toggleUiLanguage);
@@ -1647,7 +1733,7 @@ def render_page(title, content, lang="en", current_path=""):
                     if (action && action.href) {{
                         const link = document.createElement('a');
                         link.className = 'btn blue';
-                        link.href = action.href;
+                        link.href = erpCompanyUrl(action.href);
                         link.textContent = action.label || 'Open';
                         bubble.appendChild(link);
                     }}
@@ -1676,7 +1762,7 @@ def render_page(title, content, lang="en", current_path=""):
                         assistantAddMessage(message, 'user');
                         assistantInput.value = '';
                         try {{
-                            const response = await fetch('/ui/assistant/chat', {{
+                            const response = await fetch({json.dumps(assistant_chat_href)}, {{
                                 method: 'POST',
                                 headers: {{ 'Content-Type': 'application/json' }},
                                 body: JSON.stringify({{
@@ -1688,7 +1774,7 @@ def render_page(title, content, lang="en", current_path=""):
                             const data = await response.json();
                             assistantAddMessage(data.reply || {json.dumps(done_label)}, 'bot', data.action);
                             if (data.redirect && data.action && data.action.href) {{
-                                window.location.href = data.action.href;
+                                window.location.href = erpCompanyUrl(data.action.href);
                             }}
                         }} catch (e) {{
                             assistantAddMessage({json.dumps(failed_label)}, 'bot');

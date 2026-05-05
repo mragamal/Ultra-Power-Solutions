@@ -49,8 +49,20 @@ def checked_attr(value) -> str:
     return "checked" if bool(value) else ""
 
 
-def render_login_page(error_message: str = "", username: str = "") -> str:
+def _company_prefix(request: Request | None = None) -> str:
+    try:
+        prefix = request.scope.get("company_prefix") or request.scope.get("root_path") or ""
+    except Exception:
+        prefix = ""
+    prefix = str(prefix or "").strip()
+    if prefix and not prefix.startswith("/"):
+        prefix = "/" + prefix
+    return prefix.rstrip("/")
+
+
+def render_login_page(error_message: str = "", username: str = "", prefix: str = "") -> str:
     error_html = f'<div class="login-alert">{error_message}</div>' if error_message else ""
+    login_action = f"{prefix}/login" if prefix else "/login"
     return f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -412,7 +424,7 @@ def render_login_page(error_message: str = "", username: str = "") -> str:
                     <div class="login-sub">Sign in to your Premium One ERP account</div>
                     {error_html}
 
-                    <form method="post" action="/login">
+                    <form method="post" action="{login_action}">
                         <div class="field">
                             <label>Username</label>
                             <div class="input-wrap">
@@ -541,7 +553,7 @@ def login_form(request: Request):
     if user:
         return RedirectResponse(default_home_path_for_user(request), status_code=302)
 
-    return HTMLResponse(render_login_page())
+    return HTMLResponse(render_login_page(prefix=_company_prefix(request)))
 
 
 @router.post("/login")
@@ -553,13 +565,13 @@ def login_submit(
     user = get_user_by_username((username or "").strip())
 
     if not user:
-        return HTMLResponse(render_login_page("Invalid username or password.", (username or "").strip()), status_code=400)
+        return HTMLResponse(render_login_page("Invalid username or password.", (username or "").strip(), _company_prefix(request)), status_code=400)
 
     if not bool(user["is_active"]):
-        return HTMLResponse(render_login_page("This user is inactive.", (username or "").strip()), status_code=400)
+        return HTMLResponse(render_login_page("This user is inactive.", (username or "").strip(), _company_prefix(request)), status_code=400)
 
     if not verify_password(password, user["password_hash"]):
-        return HTMLResponse(render_login_page("Invalid username or password.", (username or "").strip()), status_code=400)
+        return HTMLResponse(render_login_page("Invalid username or password.", (username or "").strip(), _company_prefix(request)), status_code=400)
 
     login_user(request, user)
     return RedirectResponse(default_home_path_for_user(request), status_code=302)

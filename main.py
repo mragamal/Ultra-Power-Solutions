@@ -30,6 +30,67 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 session_signer = TimestampSigner(SESSION_SECRET_KEY)
 
 
+TENANT_RESERVED_PATHS = {
+    "ui",
+    "login",
+    "logout",
+    "static",
+    "uploads",
+    "favicon.ico",
+    "api",
+}
+
+
+def split_company_path(path: str):
+    path = path or "/"
+    parts = [part for part in path.split("/") if part]
+    if not parts:
+        return "", path
+
+    first = parts[0].strip().lower()
+    if first in TENANT_RESERVED_PATHS:
+        return "", path
+
+    if len(parts) == 1:
+        return first, "/"
+
+    rest = "/" + "/".join(parts[1:])
+    if rest == "/" or rest.startswith(("/ui", "/login", "/logout")):
+        return first, rest
+
+    return "", path
+
+
+def apply_company_path(request: Request):
+    if request.scope.get("company_path_applied"):
+        return request.scope.get("company_prefix", "")
+
+    original_path = request.scope.get("path") or request.url.path or "/"
+    company_slug, stripped_path = split_company_path(original_path)
+    prefix = f"/{company_slug}" if company_slug else ""
+
+    request.scope["company_path_applied"] = True
+    request.scope["company_slug"] = company_slug
+    request.scope["company_prefix"] = prefix
+    request.scope["original_path"] = original_path
+
+    if prefix:
+        request.scope["path"] = stripped_path or "/"
+        request.scope["root_path"] = prefix
+
+    return prefix
+
+
+def prefixed_location(prefix: str, location: str):
+    if not prefix or not location or not location.startswith("/"):
+        return location
+    if location == prefix or location.startswith(prefix + "/"):
+        return location
+    if location.startswith(("/static", "/uploads", "/favicon.ico")):
+        return location
+    return prefix + location
+
+
 def module_for_path(path: str):
     path = path or ""
     rules = [
@@ -78,7 +139,8 @@ def hydrate_session_from_cookie(request: Request):
 
 @app.middleware("http")
 async def auth_guard(request: Request, call_next):
-    path = request.url.path or ""
+    apply_company_path(request)
+    path = request.scope.get("path") or request.url.path or ""
     open_paths = ["/login", "/logout", "/static", "/favicon.ico"]
     if any(path.startswith(prefix) for prefix in open_paths):
         return await call_next(request)
@@ -93,6 +155,16 @@ async def auth_guard(request: Request, call_next):
         return RedirectResponse(default_home_path_for_user(request), status_code=302)
 
     return await call_next(request)
+
+
+@app.middleware("http")
+async def company_url_guard(request: Request, call_next):
+    prefix = apply_company_path(request)
+    response = await call_next(request)
+    location = response.headers.get("location")
+    if location:
+        response.headers["location"] = prefixed_location(prefix, location)
+    return response
 
 
 def dashboard_cards(cards):
