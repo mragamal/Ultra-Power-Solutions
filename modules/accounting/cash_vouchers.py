@@ -585,6 +585,15 @@ def get_voucher(conn, voucher_id: int):
     return conn.execute("SELECT * FROM cash_vouchers WHERE id = ? LIMIT 1", (voucher_id,)).fetchone()
 
 
+def is_employee_custody_request_payment(voucher_type: str, party_type: str, employee_trans_type: str, custody_request_id) -> bool:
+    return (
+        safe(voucher_type).lower() == "payment"
+        and safe(party_type).lower() == "employee"
+        and safe(employee_trans_type).lower() == "custody"
+        and safe_int(custody_request_id) > 0
+    )
+
+
 def voucher_journal_status(conn, voucher) -> str:
     if not voucher or not voucher["journal_id"]:
         return ""
@@ -965,9 +974,9 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
     """
     attachments = values.get("attachments") or []
     existing_attachment_html = attachment_gallery(attachments) if attachments else ""
-    attachment_required = "required" if voucher_type == "payment" and not attachments else ""
+    attachment_required = "required" if voucher_type == "payment" and not locked_custody_request and not attachments else ""
     attachment_html = ""
-    if voucher_type == "payment":
+    if voucher_type == "payment" and not locked_custody_request:
         attachment_html = f"""
             <div class="row" style="margin-top:14px;">
                 <div class="col">
@@ -1603,7 +1612,8 @@ def save_voucher(
     try:
         conn = get_conn()
         new_attachments = save_voucher_uploads(voucher_attachments)
-        if voucher_type == "payment" and not new_attachments:
+        attachment_not_required = is_employee_custody_request_payment(voucher_type, party_type, employee_trans_type, custody_request_id)
+        if voucher_type == "payment" and not attachment_not_required and not new_attachments:
             raise Exception("Attachment is required for cash payment vouchers.")
         source_type = safe(source_type).lower()
         selected_source_id = safe_int(source_id)
@@ -2069,7 +2079,8 @@ def update_voucher(
             return RedirectResponse(f"{route_base(voucher_type)}?msg=" + quote("Final posted vouchers cannot be edited."), status_code=302)
         existing_attachments = load_voucher_attachments(conn, voucher_id)
         new_attachments = save_voucher_uploads(voucher_attachments)
-        if voucher_type == "payment" and not existing_attachments and not new_attachments:
+        attachment_not_required = is_employee_custody_request_payment(voucher_type, party_type, employee_trans_type, custody_request_id)
+        if voucher_type == "payment" and not attachment_not_required and not existing_attachments and not new_attachments:
             raise Exception("Attachment is required for cash payment vouchers.")
         source_type = safe(source_type).lower()
         selected_source_id = safe_int(source_id)
