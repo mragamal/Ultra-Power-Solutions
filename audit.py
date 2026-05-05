@@ -36,6 +36,39 @@ def ensure_audit_table():
     _ensure_column(conn, "audit_log", "method", "method TEXT")
     _ensure_column(conn, "audit_log", "ip_address", "ip_address TEXT")
     _ensure_column(conn, "audit_log", "status_code", "status_code INTEGER")
+    conn.execute("""
+        UPDATE audit_log
+        SET done_by = COALESCE((
+                SELECT b.done_by
+                FROM audit_log b
+                WHERE b.entity_type = audit_log.entity_type
+                  AND b.entity_id = audit_log.entity_id
+                  AND COALESCE(TRIM(b.done_by), '') <> ''
+                  AND lower(TRIM(b.done_by)) <> 'system'
+                ORDER BY b.id DESC
+                LIMIT 1
+            ), done_by),
+            username = COALESCE(username, (
+                SELECT b.username
+                FROM audit_log b
+                WHERE b.entity_type = audit_log.entity_type
+                  AND b.entity_id = audit_log.entity_id
+                  AND COALESCE(TRIM(b.done_by), '') <> ''
+                  AND lower(TRIM(b.done_by)) <> 'system'
+                  AND COALESCE(TRIM(b.username), '') <> ''
+                ORDER BY b.id DESC
+                LIMIT 1
+            ))
+        WHERE lower(TRIM(COALESCE(done_by, ''))) = 'system'
+          AND EXISTS (
+                SELECT 1
+                FROM audit_log b
+                WHERE b.entity_type = audit_log.entity_type
+                  AND b.entity_id = audit_log.entity_id
+                  AND COALESCE(TRIM(b.done_by), '') <> ''
+                  AND lower(TRIM(b.done_by)) <> 'system'
+          )
+    """)
 
     conn.commit()
     conn.close()
