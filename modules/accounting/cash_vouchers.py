@@ -1,8 +1,12 @@
 ﻿from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from datetime import date
+from pathlib import Path
+from uuid import uuid4
+from html import escape
+from urllib.parse import quote
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from auth import can
@@ -10,6 +14,7 @@ from db import get_conn
 from i18n import get_lang
 from layout import render_page
 from modules.accounting.accounting_engine import create_journal_entry, post_journal_entry, submit_journal_for_final_post, reverse_journal_entry
+from modules.accounting.invoice_ai import attachment_gallery
 from modules.accounting.allocation_engine import (
     delete_payment_allocations,
     get_allocated_total_for_payment,
@@ -109,6 +114,9 @@ AR_TRANSLATIONS = {
     "Reverse Journal ID:": "رقم قيد العكس:",
     "Status:": "الحالة:",
     "Description:": "البيان:",
+    "Voucher Attachments": "مرفقات السند",
+    "Attachment is required for cash payment vouchers.": "لا يمكن حفظ سند الصرف بدون مرفق.",
+    "Only PDF or image attachments are allowed.": "المرفقات المسموحة PDF أو صور فقط.",
 }
 
 
@@ -155,6 +163,54 @@ def ensure_column(conn, table_name, column_name, alter_sql):
     names = [c["name"] for c in cols]
     if column_name not in names:
         conn.execute(alter_sql)
+
+
+def save_voucher_uploads(files):
+    saved = []
+    upload_dir = Path("uploads") / "cash_vouchers"
+    allowed_suffixes = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+    for upload in files or []:
+        filename = safe(getattr(upload, "filename", ""))
+        if not filename:
+            continue
+        suffix = Path(filename).suffix.lower()
+        if suffix not in allowed_suffixes:
+            raise Exception("Only PDF or image attachments are allowed.")
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        stored_name = f"{uuid4().hex}{suffix}"
+        target = upload_dir / stored_name
+        with target.open("wb") as handle:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+        saved.append({"file_url": f"/uploads/cash_vouchers/{stored_name}", "file_name": filename})
+    return saved
+
+
+def load_voucher_attachments(conn, voucher_id):
+    rows = conn.execute(
+        """
+        SELECT file_url, file_name
+        FROM cash_voucher_attachments
+        WHERE voucher_id = ?
+        ORDER BY id
+        """,
+        (voucher_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_voucher_attachments(conn, voucher_id, attachments):
+    for item in attachments or []:
+        conn.execute(
+            """
+            INSERT INTO cash_voucher_attachments (voucher_id, file_url, file_name)
+            VALUES (?, ?, ?)
+            """,
+            (voucher_id, safe(item.get("file_url")), safe(item.get("file_name"))),
+        )
 
 
 def ensure_tables():
@@ -213,6 +269,17 @@ def ensure_tables():
             expense_payment_source TEXT,
             expense_employee_id INTEGER,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cash_voucher_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            voucher_id INTEGER NOT NULL,
+            file_url TEXT NOT NULL,
+            file_name TEXT,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -866,13 +933,27 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
                     <input id="employee_counter_account_value" value="{employee_counter_account}" readonly>
                 </div>
     """
+    attachments = values.get("attachments") or []
+    existing_attachment_html = attachment_gallery(attachments) if attachments else ""
+    attachment_required = "required" if voucher_type == "payment" and not attachments else ""
+    attachment_html = ""
+    if voucher_type == "payment":
+        attachment_html = f"""
+            <div class="row" style="margin-top:14px;">
+                <div class="col">
+                    <label>{tr(lang, 'Voucher Attachments', 'مرفقات السند')}</label>
+                    <input type="file" name="voucher_attachments" accept=".pdf,image/*" multiple {attachment_required}>
+                </div>
+            </div>
+            {existing_attachment_html}
+        """
 
     return f"""
     <div class="card">
         {error_html}
         <h2>{voucher_title(lang, voucher_type)}</h2>
         {source_notice}
-        <form method="post" action="{action_url}">
+        <form method="post" action="{action_url}" enctype="multipart/form-data">
             <input type="hidden" name="source_type" value="{source_type}">
             <input type="hidden" name="source_id" value="{source_id}">
             {'<input type="hidden" name="party_type" value="employee"><input type="hidden" name="employee_trans_type" value="custody_return"><input type="hidden" name="counter_account_code" value="' + employee_custody_account_code() + '">' if is_custody_return_receipt else ''}
@@ -1003,6 +1084,7 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
                     <input name="description" value="{safe(values.get('description'))}">
                 </div>
             </div>
+            {attachment_html}
             <div style="margin-top:18px;">
                 <button class="btn green" type="submit">{tr(lang, 'Save Draft', 'ط­ظپط¸ ظƒظ…ط³ظˆط¯ط©')}</button>
                 <a class="btn gray" href="{route_base(voucher_type)}">{tr(lang, 'Back', 'ط±ط¬ظˆط¹')}</a>
@@ -1427,6 +1509,7 @@ def save_voucher(
     source_id: str = "",
     expense_payment_source: str = "",
     expense_employee_id: str = "",
+    voucher_attachments=None,
 ):
     if not accounting_allowed(request, "create"):
         return HTMLResponse("Permission denied", status_code=403)
@@ -1453,6 +1536,9 @@ def save_voucher(
     conn = None
     try:
         conn = get_conn()
+        new_attachments = save_voucher_uploads(voucher_attachments)
+        if voucher_type == "payment" and not new_attachments:
+            raise Exception("Attachment is required for cash payment vouchers.")
         source_type = safe(source_type).lower()
         selected_source_id = safe_int(source_id)
         if source_type == "custody_return_request":
@@ -1638,6 +1724,7 @@ def save_voucher(
             ),
         )
         voucher_id = cur.lastrowid
+        insert_voucher_attachments(conn, voucher_id, new_attachments)
         create_draft_journal(conn, voucher_id)
         conn.commit()
         conn.close()
@@ -1674,8 +1761,9 @@ def create_cash_receipt(
     source_id: str = Form(""),
     expense_payment_source: str = Form(""),
     expense_employee_id: str = Form(""),
+    voucher_attachments: list[UploadFile] = File(None),
 ):
-    return save_voucher(request, "receipt", voucher_no, voucher_date, party_name, party_type, customer_id, vendor_id, employee_id, employee_trans_type, advance_id, custody_request_id, liquidity_account_code, counter_account_code, amount, description, signature_name, source_type, source_id, expense_payment_source, expense_employee_id)
+    return save_voucher(request, "receipt", voucher_no, voucher_date, party_name, party_type, customer_id, vendor_id, employee_id, employee_trans_type, advance_id, custody_request_id, liquidity_account_code, counter_account_code, amount, description, signature_name, source_type, source_id, expense_payment_source, expense_employee_id, voucher_attachments)
 
 
 @router.post("/ui/accounting/cash-payments/new")
@@ -1700,8 +1788,9 @@ def create_cash_payment(
     source_id: str = Form(""),
     expense_payment_source: str = Form(""),
     expense_employee_id: str = Form(""),
+    voucher_attachments: list[UploadFile] = File(None),
 ):
-    return save_voucher(request, "payment", voucher_no, voucher_date, party_name, party_type, customer_id, vendor_id, employee_id, employee_trans_type, advance_id, custody_request_id, liquidity_account_code, counter_account_code, amount, description, signature_name, source_type, source_id, expense_payment_source, expense_employee_id)
+    return save_voucher(request, "payment", voucher_no, voucher_date, party_name, party_type, customer_id, vendor_id, employee_id, employee_trans_type, advance_id, custody_request_id, liquidity_account_code, counter_account_code, amount, description, signature_name, source_type, source_id, expense_payment_source, expense_employee_id, voucher_attachments)
 
 
 def render_allocation_card(lang: str, conn, voucher):
@@ -1776,6 +1865,7 @@ def open_voucher_page(request: Request, voucher_id: int, voucher_type: str):
         """
 
     allocation_html = render_allocation_card(lang, conn, voucher) if status == "posted" else ""
+    attachments_html = attachment_gallery(load_voucher_attachments(conn, voucher_id))
     show_counter_account = (
         safe(voucher["party_type"]).lower() == "other"
         and safe(voucher["source_type"]).lower() not in ("expense", "employee_grant")
@@ -1808,6 +1898,7 @@ def open_voucher_page(request: Request, voucher_id: int, voucher_type: str):
             <a class="btn gray" href="{route_base(voucher_type)}">{tr(lang, 'Back', 'ط±ط¬ظˆط¹')}</a>
         </div>
     </div>
+    {attachments_html}
     {allocation_html}
     """
     return HTMLResponse(render_page(voucher_title(lang, voucher_type), html, lang, current_path=request.url.path))
@@ -1869,6 +1960,7 @@ def edit_voucher_page(request: Request, voucher_id: int, voucher_type: str):
         if not voucher_can_modify(conn, voucher):
             return RedirectResponse(f"{route_base(voucher_type)}?msg=" + quote("Final posted vouchers cannot be edited."), status_code=302)
         values = dict(voucher)
+        values["attachments"] = load_voucher_attachments(conn, voucher_id)
         return HTMLResponse(render_page(voucher_title(lang, voucher_type), render_form(lang, voucher_type, f"{route_base(voucher_type)}/{voucher_id}/edit", values), lang, current_path=request.url.path))
     finally:
         conn.close()
@@ -1897,6 +1989,7 @@ def update_voucher(
     source_id: str = "",
     expense_payment_source: str = "",
     expense_employee_id: str = "",
+    voucher_attachments=None,
 ):
     if not accounting_allowed(request, "edit"):
         return HTMLResponse("Permission denied", status_code=403)
@@ -1908,6 +2001,10 @@ def update_voucher(
             return HTMLResponse(tr(lang, "Voucher not found", "السند غير موجود"), status_code=404)
         if not voucher_can_modify(conn, voucher):
             return RedirectResponse(f"{route_base(voucher_type)}?msg=" + quote("Final posted vouchers cannot be edited."), status_code=302)
+        existing_attachments = load_voucher_attachments(conn, voucher_id)
+        new_attachments = save_voucher_uploads(voucher_attachments)
+        if voucher_type == "payment" and not existing_attachments and not new_attachments:
+            raise Exception("Attachment is required for cash payment vouchers.")
         source_type = safe(source_type).lower()
         selected_source_id = safe_int(source_id)
         expense_payment_source = safe(expense_payment_source).lower() or "liquidity"
@@ -2009,6 +2106,7 @@ def update_voucher(
                 voucher_id,
             ),
         )
+        insert_voucher_attachments(conn, voucher_id, new_attachments)
         create_draft_journal(conn, voucher_id)
         conn.commit()
         return RedirectResponse(f"{route_base(voucher_type)}/{voucher_id}", status_code=302)
@@ -2032,6 +2130,7 @@ def update_voucher(
             "source_id": source_id,
             "expense_payment_source": expense_payment_source,
             "expense_employee_id": expense_employee_id,
+            "attachments": load_voucher_attachments(conn, voucher_id),
         }
         return HTMLResponse(render_page(voucher_title(lang, voucher_type), render_form(lang, voucher_type, f"{route_base(voucher_type)}/{voucher_id}/edit", values, escape(str(e))), lang, current_path=request.url.path), status_code=400)
     finally:
@@ -2053,6 +2152,7 @@ def delete_draft_voucher(request: Request, voucher_id: int, voucher_type: str):
             return RedirectResponse(f"{route_base(voucher_type)}?msg=" + quote("Final posted vouchers cannot be deleted."), status_code=302)
         remove_draft_voucher_journal(conn, voucher)
         reset_draft_voucher_source(conn, voucher)
+        conn.execute("DELETE FROM cash_voucher_attachments WHERE voucher_id = ?", (voucher_id,))
         conn.execute("DELETE FROM cash_vouchers WHERE id = ?", (voucher_id,))
         conn.commit()
         return RedirectResponse(f"{route_base(voucher_type)}?msg=" + quote("Draft voucher deleted."), status_code=302)
@@ -2096,8 +2196,9 @@ def update_cash_receipt(
     source_id: str = Form(""),
     expense_payment_source: str = Form(""),
     expense_employee_id: str = Form(""),
+    voucher_attachments: list[UploadFile] = File(None),
 ):
-    return update_voucher(request, voucher_id, "receipt", voucher_no, voucher_date, party_name, party_type, customer_id, vendor_id, employee_id, employee_trans_type, advance_id, custody_request_id, liquidity_account_code, counter_account_code, amount, description, signature_name, source_type, source_id, expense_payment_source, expense_employee_id)
+    return update_voucher(request, voucher_id, "receipt", voucher_no, voucher_date, party_name, party_type, customer_id, vendor_id, employee_id, employee_trans_type, advance_id, custody_request_id, liquidity_account_code, counter_account_code, amount, description, signature_name, source_type, source_id, expense_payment_source, expense_employee_id, voucher_attachments)
 
 
 @router.post("/ui/accounting/cash-payments/{voucher_id}/edit")
@@ -2123,8 +2224,9 @@ def update_cash_payment(
     source_id: str = Form(""),
     expense_payment_source: str = Form(""),
     expense_employee_id: str = Form(""),
+    voucher_attachments: list[UploadFile] = File(None),
 ):
-    return update_voucher(request, voucher_id, "payment", voucher_no, voucher_date, party_name, party_type, customer_id, vendor_id, employee_id, employee_trans_type, advance_id, custody_request_id, liquidity_account_code, counter_account_code, amount, description, signature_name, source_type, source_id, expense_payment_source, expense_employee_id)
+    return update_voucher(request, voucher_id, "payment", voucher_no, voucher_date, party_name, party_type, customer_id, vendor_id, employee_id, employee_trans_type, advance_id, custody_request_id, liquidity_account_code, counter_account_code, amount, description, signature_name, source_type, source_id, expense_payment_source, expense_employee_id, voucher_attachments)
 
 
 @router.post("/ui/accounting/cash-receipts/{voucher_id}/delete")

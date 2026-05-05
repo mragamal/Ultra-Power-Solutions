@@ -7,6 +7,7 @@ from db import get_conn
 from layout import render_page
 from i18n import get_lang
 from modules.accounting.config import get_setting_value
+from modules.accounting.invoice_ai import attachment_gallery, attachments_from_form
 from modules.accounting.accounting_engine import (
     create_journal_entry,
     delete_draft_journal_entry,
@@ -86,6 +87,30 @@ def safe_get_logs(entity_type, entity_id):
         return get_audit_logs(entity_type, entity_id)
     except Exception:
         return []
+
+
+def expense_attachments(conn, expense_id):
+    rows = conn.execute(
+        """
+        SELECT file_url, file_name
+        FROM expense_attachments
+        WHERE expense_id = ?
+        ORDER BY id
+        """,
+        (expense_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def insert_expense_attachments(conn, expense_id, attachments):
+    for item in attachments or []:
+        conn.execute(
+            """
+            INSERT INTO expense_attachments (expense_id, file_url, file_name)
+            VALUES (?, ?, ?)
+            """,
+            (expense_id, safe(item.get("file_url")), safe(item.get("file_name"))),
+        )
 
 
 def ensure_column(conn, table_name, column_name, alter_sql):
@@ -243,6 +268,16 @@ def ensure_tables():
             cost_center_id INTEGER,
             line_description TEXT,
             amount REAL DEFAULT 0
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS expense_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expense_id INTEGER NOT NULL,
+            file_url TEXT NOT NULL,
+            file_name TEXT,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -568,6 +603,9 @@ def build_expense_form_html(lang, action_url, error_message="", form_data=None, 
     expense_date = form_data.get("expense_date") or ""
     description = form_data.get("description") or ""
     employee_id = form_data.get("employee_id") or ""
+    attachments = form_data.get("attachments") or []
+    existing_attachment_html = attachment_gallery(attachments) if attachments else ""
+    attachment_required = "required" if not attachments else ""
 
     error_html = f'<div class="msg error">{error_message}</div>' if error_message else ""
 
@@ -579,7 +617,7 @@ def build_expense_form_html(lang, action_url, error_message="", form_data=None, 
         <h2>{tr(lang, 'Edit Expense', 'تعديل المصروف') if '/edit' in action_url else tr(lang, 'New Expense', 'مصروف جديد')}</h2>
         {error_html}
 
-        <form method="post" id="expenseForm" action="{action_url}">
+        <form method="post" id="expenseForm" action="{action_url}" enctype="multipart/form-data">
             <div class="row">
                 <div class="col">
                     <label>{tr(lang, 'No', 'الرقم')}</label>
@@ -630,6 +668,14 @@ def build_expense_form_html(lang, action_url, error_message="", form_data=None, 
                     <div><b>{tr(lang, 'Total:', 'الإجمالي:')}</b> <span id="expenseTotal">0.00</span></div>
                 </div>
             </div>
+
+            <div class="row" style="margin-top:14px;">
+                <div class="col">
+                    <label>{tr(lang, 'Expense Attachments', 'مرفقات المصروف')}</label>
+                    <input type="file" name="invoice_attachments" accept=".pdf,image/*" multiple {attachment_required}>
+                </div>
+            </div>
+            {existing_attachment_html}
 
             <div style="margin-top:20px;">
                 <button class="btn green" type="submit">{tr(lang, 'Save', 'حفظ')}</button>
@@ -810,6 +856,17 @@ async def save_expense(request: Request):
         })
         i += 1
 
+    new_attachments = await attachments_from_form(form)
+    if not new_attachments:
+        html = build_expense_form_html(
+            lang,
+            "/ui/accounting/expenses/new",
+            tr(lang, "Attachment is required.", "لا يمكن حفظ المصروف بدون مرفق."),
+            form_data,
+            initial_lines
+        )
+        return HTMLResponse(render_page("New Expense", html, lang, current_path="/ui/accounting/expenses/new"), status_code=400)
+
     conn = get_conn()
     try:
         cur = conn.execute("""
@@ -826,6 +883,7 @@ async def save_expense(request: Request):
             employee_id,
         ))
         expense_id = cur.lastrowid
+        insert_expense_attachments(conn, expense_id, new_attachments)
 
         total = Decimal("0.00")
         line_no = 1
@@ -917,6 +975,7 @@ def open_expense(request: Request, expense_id: int):
 
     lines = get_expense_lines(conn, expense_id)
     payment = get_expense_payment(conn, expense_id)
+    attachments_html = attachment_gallery(expense_attachments(conn, expense_id))
     conn.close()
 
     logs = safe_get_logs("expense", expense_id)
@@ -994,6 +1053,8 @@ def open_expense(request: Request, expense_id: int):
         </div>
     </div>
 
+    {attachments_html}
+
     <div class="card">
         <h3>Lines</h3>
         <table>
@@ -1037,6 +1098,7 @@ def edit_expense(request: Request, expense_id: int):
         return RedirectResponse(f"/ui/accounting/expenses/{expense_id}", status_code=302)
 
     lines = get_expense_lines(conn, expense_id)
+    attachments = expense_attachments(conn, expense_id)
     conn.close()
 
     initial_lines = []
@@ -1057,6 +1119,7 @@ def edit_expense(request: Request, expense_id: int):
             "description": expense["description"] or "",
             "payment_source": expense["payment_source"] or "",
             "employee_id": str(expense["employee_id"] or ""),
+            "attachments": attachments,
         },
         initial_lines=initial_lines
     )
@@ -1076,6 +1139,7 @@ async def update_expense(request: Request, expense_id: int):
         conn.close()
         return HTMLResponse("Expense not found", status_code=404)
 
+    existing_attachments = expense_attachments(conn, expense_id)
     journal_status = get_expense_journal_status(expense)
     if not expense_can_edit_before_final(expense):
         conn.close()
@@ -1093,6 +1157,7 @@ async def update_expense(request: Request, expense_id: int):
         "description": description,
         "payment_source": payment_source,
         "employee_id": employee_id_raw or "",
+        "attachments": existing_attachments,
     }
 
     initial_lines = []
@@ -1108,6 +1173,18 @@ async def update_expense(request: Request, expense_id: int):
             "desc": form.get(f"desc_{i}") or "",
         })
         i += 1
+
+    new_attachments = await attachments_from_form(form)
+    if not existing_attachments and not new_attachments:
+        conn.close()
+        html = build_expense_form_html(
+            lang,
+            f"/ui/accounting/expenses/{expense_id}/edit",
+            tr(lang, "Attachment is required.", "لا يمكن حفظ المصروف بدون مرفق."),
+            form_data,
+            initial_lines
+        )
+        return HTMLResponse(render_page(tr(lang, "Edit Expense", "تعديل المصروف"), html, lang, current_path=f"/ui/accounting/expenses/{expense_id}/edit"), status_code=400)
 
     try:
         conn.execute("""
@@ -1173,6 +1250,7 @@ async def update_expense(request: Request, expense_id: int):
             SET total_amount = ?
             WHERE id = ?
         """, (float(total), expense_id))
+        insert_expense_attachments(conn, expense_id, new_attachments)
 
         new_journal_id = None
         conn.commit()
