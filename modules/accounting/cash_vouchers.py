@@ -869,6 +869,13 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
     values = values or {}
     error_html = f'<div class="msg error">{error}</div>' if error else ""
     party_type = safe(values.get("party_type")).lower() or "other"
+    locked_custody_request = (
+        voucher_type == "payment"
+        and party_type == "employee"
+        and safe(values.get("employee_trans_type")).lower() == "custody"
+        and safe_int(values.get("custody_request_id")) > 0
+        and safe(values.get("locked_custody_request")) == "1"
+    )
     manual_party_display = "block" if party_type not in ("customer", "vendor", "employee") else "none"
     customer_display = "block" if party_type == "customer" else "none"
     vendor_display = "block" if party_type == "vendor" else "none"
@@ -921,6 +928,29 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
         counter_select_display = "none"
         employee_counter_display = "none"
         employee_counter_account = employee_custody_account_code()
+    locked_custody_html = ""
+    locked_hidden_fields = ""
+    if locked_custody_request:
+        advance_select_display = "none"
+        custody_select_display = "none"
+        counter_select_display = "none"
+        employee_counter_display = "none"
+        employee_counter_account = employee_custody_account_code()
+        locked_hidden_fields = f"""
+            <input type="hidden" name="party_type" value="employee">
+            <input type="hidden" name="employee_id" value="{safe(values.get('party_id'))}">
+            <input type="hidden" name="employee_trans_type" value="custody">
+            <input type="hidden" name="custody_request_id" value="{safe(values.get('custody_request_id'))}">
+            <input type="hidden" name="counter_account_code" value="{employee_custody_account_code()}">
+        """
+        locked_custody_html = f"""
+            <div class="row" style="margin-top:14px;">
+                <div class="col">
+                    <label>{tr(lang, 'Select Custody Request', 'اختر طلب العهدة')}</label>
+                    <input value="{safe(values.get('custody_request_label'))}" readonly style="background:#f3f4f6;">
+                </div>
+            </div>
+        """
     counter_account_fields = "" if is_expense_payment else f"""
                 <div class="col" id="counter_account_wrap" style="display:{'none' if is_expense_payment else counter_select_display};">
                     <label>{tr(lang, 'Counter Account', 'ط·آ§ط¸â€‍ط·آ­ط·آ³ط·آ§ط·آ¨ ط·آ§ط¸â€‍ط¸â€¦ط¸â€ڑط·آ§ط·آ¨ط¸â€‍')}</label>
@@ -958,6 +988,7 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
             <input type="hidden" name="source_id" value="{source_id}">
             {'<input type="hidden" name="party_type" value="employee"><input type="hidden" name="employee_trans_type" value="custody_return"><input type="hidden" name="counter_account_code" value="' + employee_custody_account_code() + '">' if is_custody_return_receipt else ''}
             {'<input type="hidden" name="party_type" value="other"><input type="hidden" name="counter_account_code" value="EXPENSE-LINES">' if is_expense_payment else ''}
+            {locked_hidden_fields}
             <div class="row">
                 <div class="col">
                     <label>{tr(lang, 'Voucher No', 'ط±ظ‚ظ… ط§ظ„ط³ظ†ط¯')}</label>
@@ -973,7 +1004,7 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
                     <label>{party_label(lang, voucher_type)}</label>
                     <input name="party_name" value="{safe(values.get('party_name'))}">
                 </div>
-                <div class="col" style="display:{"none" if (is_expense_payment or is_custody_return_receipt) else "block"};">
+                <div class="col" style="display:{"none" if (is_expense_payment or is_custody_return_receipt or locked_custody_request) else "block"};">
                     <label>{tr(lang, 'Party Type', 'ظ†ظˆط¹ ط§ظ„ط·ط±ظپ')}</label>
                     <select name="party_type" id="party_type" onchange="toggleLinkedPartyFields()" {"disabled" if is_expense_payment else ""}>
                         {party_type_select_html(lang, party_type)}
@@ -996,7 +1027,7 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
                 <div class="col" id="employee_party_wrap" style="display:{employee_display};">
                     <label>{tr(lang, 'Linked Employee', 'ط§ظ„ظ…ظˆط¸ظپ ط§ظ„ظ…ط±طھط¨ط·')}</label>
                     <div style="display:flex; gap:8px;">
-                        <select name="employee_id" id="employee_id" style="flex:1;" onchange="syncLinkedPartyName(); updateEmployeeAdvances();">
+                        <select name="employee_id" id="employee_id" style="flex:1;" onchange="syncLinkedPartyName(); updateEmployeeAdvances();" {"disabled" if locked_custody_request else ""}>
                             {linked_party_options(lang, 'employee', values.get('party_id') if party_type == 'employee' else '')}
                         </select>
                         <a id="employee_statement_link" class="btn blue" style="padding: 8px 12px; display: {employee_display};" href="#" target="_blank">
@@ -1005,8 +1036,9 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
                     </div>
                 </div>
             </div>
+            {locked_custody_html}
             
-            <div id="employee_extra_fields" style="display:{'none' if is_custody_return_receipt else employee_display}; border:1px solid #eee; padding:10px; border-radius:4px; margin-top:14px; background:#f9f9f9;">
+            <div id="employee_extra_fields" style="display:{'none' if (is_custody_return_receipt or locked_custody_request) else employee_display}; border:1px solid #eee; padding:10px; border-radius:4px; margin-top:14px; background:#f9f9f9;">
                 <div class="row">
                     <div class="col">
                         <label>{tr(lang, 'Transaction Type', 'ظ†ظˆط¹ ط§ظ„ط¹ظ…ظ„ظٹط©')}</label>
@@ -1092,6 +1124,7 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
         </form>
         <script>
         const isExpensePayment = {str(is_expense_payment).lower()};
+        const isLockedCustodyRequest = {str(locked_custody_request).lower()};
         function toggleExpensePaymentSource() {{
             const source = document.getElementById('expense_payment_source')?.value || 'liquidity';
             const employeeWrap = document.getElementById('expense_employee_wrap');
@@ -1107,6 +1140,10 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
         function toggleLinkedPartyFields() {{
             if ({str(is_custody_return_receipt).lower()}) return;
             if (isExpensePayment) return;
+            if (isLockedCustodyRequest) {{
+                syncLinkedPartyName();
+                return;
+            }}
             const type = document.getElementById('party_type')?.value || 'other';
             const transType = document.getElementById('employee_trans_type')?.value || '';
             const manualWrap = document.getElementById('manual_party_wrap');
@@ -1413,6 +1450,35 @@ def cash_payments_new(request: Request):
         "expense_payment_source": params.get("expense_payment_source") or "liquidity",
         "expense_employee_id": params.get("expense_employee_id"),
     }
+    if (
+        safe(values.get("party_type")).lower() == "employee"
+        and safe(values.get("employee_trans_type")).lower() == "custody"
+        and safe_int(values.get("custody_request_id")) > 0
+    ):
+        conn = get_conn()
+        req = conn.execute(
+            """
+            SELECT r.*, e.code AS employee_code, e.name AS employee_name
+            FROM employee_custody_requests r
+            LEFT JOIN employees e ON e.id = r.employee_id
+            WHERE r.id = ?
+            LIMIT 1
+            """,
+            (safe_int(values.get("custody_request_id")),),
+        ).fetchone()
+        conn.close()
+        if req:
+            emp_label = f"{safe(req['employee_code'])} - {safe(req['employee_name'])}".strip(" -")
+            values["party_type"] = "employee"
+            values["party_id"] = safe(req["employee_id"])
+            values["employee_trans_type"] = "custody"
+            values["custody_request_id"] = safe(req["id"])
+            values["amount"] = str(float(req["amount"] or 0))
+            values["party_name"] = safe(req["employee_name"])
+            values["counter_account_code"] = employee_custody_account_code()
+            values["locked_custody_request"] = "1"
+            values["custody_request_label"] = f"{safe(req['request_no'])} | {money(req['amount'])} | {emp_label}"
+            values["description"] = values.get("description") or f"{tr(lang, 'Disburse custody no.', 'صرف عهدة رقم')} {safe(req['request_no'])} {tr(lang, 'to employee', 'للموظف')} {emp_label}"
     if safe(values.get("source_type")).lower() == "expense" and safe_int(values.get("source_id")) > 0:
         conn = get_conn()
         expense = conn.execute("SELECT * FROM expenses WHERE id = ? LIMIT 1", (safe_int(values.get("source_id")),)).fetchone()
