@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from db import get_conn
 from layout import render_page
 from i18n import get_lang
+from audit import actor_name_from_request, safe_log_action, render_audit_log_card
 from modules.accounting.accounting_engine import (
     create_journal_entry,
     delete_draft_journal_entry,
@@ -782,6 +783,73 @@ def sync_custody_request_status_if_needed(conn, row):
             "UPDATE employee_custody_requests SET status = ? WHERE id = ?",
             (effective_status, int(row["id"] or 0)),
         )
+
+
+def custody_request_related_activity(conn, request_id: int, lang: str) -> str:
+    rows = conn.execute(
+        """
+        SELECT
+            v.id,
+            v.voucher_no,
+            v.voucher_date,
+            v.amount,
+            v.status,
+            v.journal_id,
+            j.entry_no,
+            j.status AS journal_status
+        FROM cash_vouchers v
+        LEFT JOIN journal_entries j ON j.id = v.journal_id
+        WHERE COALESCE(v.custody_request_id, 0) = ?
+          AND LOWER(COALESCE(v.voucher_type,'')) = 'payment'
+          AND LOWER(COALESCE(v.employee_trans_type,'')) = 'custody'
+        ORDER BY v.id DESC
+        """,
+        (request_id,),
+    ).fetchall()
+
+    if not rows:
+        return ""
+
+    items = []
+    for row in rows:
+        voucher_no = safe(row["voucher_no"]) or f"CPV-{row['id']}"
+        journal_label = safe(row["entry_no"]) or (str(row["journal_id"]) if row["journal_id"] else "")
+        voucher_href = f"/ui/accounting/cash-payments/{row['id']}"
+        journal_href = f"/ui/accounting/journal/{row['journal_id']}" if row["journal_id"] else ""
+        status = safe(row["status"])
+        journal_status = safe(row["journal_status"])
+        journal_html = (
+            f'<a class="btn blue btn-sm" href="{journal_href}">{L(lang, "Open Journal", "فتح القيد")}</a>'
+            if journal_href else ""
+        )
+        items.append(f"""
+        <div class="audit-item">
+            <div class="audit-item-head">
+                <div class="audit-item-title">{L(lang, "Cash payment created", "تم إنشاء سند صرف")} - {voucher_no}</div>
+                <div class="audit-item-meta">{safe(row["voucher_date"])}</div>
+            </div>
+            <div class="audit-note">
+                {L(lang, "Amount", "المبلغ")}: {money(row["amount"])}
+                &nbsp; | &nbsp; {L(lang, "Voucher Status", "حالة السند")}: {status}
+                {f' &nbsp; | &nbsp; {L(lang, "Journal", "القيد")}: {journal_label} ({journal_status})' if journal_label else ''}
+            </div>
+            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+                <a class="btn gray btn-sm" href="{voucher_href}">{L(lang, "Open Voucher", "فتح السند")}</a>
+                {journal_html}
+            </div>
+        </div>
+        """)
+
+    return f"""
+    <div class="card" style="margin-top:20px;">
+        <div class="toolbar" style="margin-bottom:12px;">
+            <h3 class="sub-title" style="margin:0;">{L(lang, "Related Movements", "الحركات المرتبطة")}</h3>
+        </div>
+        <div class="audit-list">
+            {''.join(items)}
+        </div>
+    </div>
+    """
 
 
 def return_request_has_receipt(conn, request_id: int) -> bool:
@@ -1625,6 +1693,7 @@ def render_custody_request_edit_form(
 
 @router.post("/ui/accounting/petty-cash/custody-request/new")
 def custody_request_create(
+    request: Request,
     request_no: str = Form(""),
     request_date: str = Form(""),
     employee_id: str = Form(""),
@@ -1643,15 +1712,24 @@ def custody_request_create(
         if not emp_name:
             raise Exception("Employee not found in HR module.")
 
+        stored_request_no = safe(request_no) or next_custody_request_no()
         cur = conn.execute(
             """
             INSERT INTO employee_custody_requests (
                 request_no, request_date, employee_id, amount, notes, status
             ) VALUES (?, ?, ?, ?, ?, 'active')
             """,
-            (safe(request_no) or next_custody_request_no(), safe(request_date), emp_id, float(amount or 0), safe(notes)),
+            (stored_request_no, safe(request_date), emp_id, float(amount or 0), safe(notes)),
         )
         request_id = cur.lastrowid
+        safe_log_action(
+            "custody_request",
+            request_id,
+            "Created",
+            actor_name_from_request(request),
+            f"Request {stored_request_no} for {emp_name}, amount {money(amount)}",
+            conn=conn,
+        )
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -1725,6 +1803,14 @@ def custody_request_update(
             """,
             (safe(request_date), emp_id, float(amount or 0), safe(notes), request_id),
         )
+        safe_log_action(
+            "custody_request",
+            request_id,
+            "Updated",
+            actor_name_from_request(request),
+            f"Employee: {emp_name}, amount: {money(amount)}",
+            conn=conn,
+        )
         conn.commit()
         conn.close()
         return RedirectResponse(f"/ui/accounting/petty-cash/custody-request/{request_id}", status_code=302)
@@ -1753,6 +1839,14 @@ def custody_request_delete(request: Request, request_id: int):
             raise Exception(L(lang, "Request not found", "الطلب غير موجود"))
         if not custody_request_can_modify(conn, row):
             raise Exception(L(lang, "Only not-disbursed requests can be deleted.", "يمكن حذف الطلبات غير المصروفة فقط."))
+        safe_log_action(
+            "custody_request",
+            request_id,
+            "Deleted",
+            actor_name_from_request(request),
+            f"Request {safe(row['request_no'])}, amount {money(row['amount'])}",
+            conn=conn,
+        )
         conn.execute("DELETE FROM employee_custody_requests WHERE id = ?", (request_id,))
         conn.commit()
         conn.close()
@@ -1787,6 +1881,23 @@ def custody_request_open(request: Request, request_id: int):
             <button class="btn red" type="submit">{L(lang, "Delete", "حذف")}</button>
         </form>
         """
+    related_activity_html = custody_request_related_activity(conn, request_id, lang)
+    existing_log = conn.execute(
+        "SELECT id FROM audit_log WHERE entity_type = 'custody_request' AND entity_id = ? LIMIT 1",
+        (request_id,),
+    ).fetchone()
+    if not existing_log:
+        safe_log_action(
+            "custody_request",
+            request_id,
+            "Created",
+            "System",
+            f"Request {safe(row['request_no'])}, amount {money(row['amount'])}",
+            conn=conn,
+            done_at=safe(row["created_at"]) or None,
+        )
+        conn.commit()
+    audit_html = render_audit_log_card("custody_request", request_id, L(lang, "Activity Log", "سجل النشاط"))
     conn.close()
 
     html = f"""
@@ -1803,6 +1914,8 @@ def custody_request_open(request: Request, request_id: int):
             <a class="btn gray" href="/ui/accounting/petty-cash">{L(lang, "Back", "رجوع")}</a>
         </div>
     </div>
+    {related_activity_html}
+    {audit_html}
     """
     return HTMLResponse(render_page(L(lang, "Custody Request", "طلب صرف عهدة"), html, lang, current_path=request.url.path))
 
