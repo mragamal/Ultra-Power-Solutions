@@ -2045,7 +2045,10 @@ def delete_draft_voucher(request: Request, voucher_id: int, voucher_type: str):
     try:
         voucher = get_voucher(conn, voucher_id)
         if not voucher or safe(voucher["voucher_type"]) != voucher_type:
-            return HTMLResponse("Voucher not found", status_code=404)
+            return RedirectResponse(
+                f"{route_base(voucher_type)}?msg=" + quote("Voucher is already deleted or not found."),
+                status_code=302,
+            )
         if not voucher_can_modify(conn, voucher):
             return RedirectResponse(f"{route_base(voucher_type)}?msg=" + quote("Final posted vouchers cannot be deleted."), status_code=302)
         remove_draft_voucher_journal(conn, voucher)
@@ -2156,7 +2159,10 @@ def set_voucher_status(request: Request, voucher_id: int, voucher_type: str, act
     voucher = get_voucher(conn, voucher_id)
     if not voucher or safe(voucher["voucher_type"]) != voucher_type:
         conn.close()
-        return HTMLResponse("Voucher not found", status_code=404)
+        return RedirectResponse(
+            f"{route_base(voucher_type)}?msg=" + quote("Voucher is already deleted or not found."),
+            status_code=302,
+        )
     try:
         if action == "post":
             journal_status = voucher_journal_status(conn, voucher)
