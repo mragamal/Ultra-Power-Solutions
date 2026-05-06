@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 
 from db import get_conn
 from layout import render_page
+from audit import render_audit_log_card, safe_log_request_action
 from modules.hr.categories import category_options_html, ensure_categories_table
 
 try:
@@ -167,6 +168,132 @@ def next_employee_code():
     except Exception:
         num = 0
     return f"EMP-{num + 1:04d}"
+
+
+def q_count(conn, sql, params=()):
+    try:
+        return int(conn.execute(sql, params).fetchone()[0] or 0)
+    except Exception:
+        return 0
+
+
+def q_sum(conn, sql, params=()):
+    try:
+        return float(conn.execute(sql, params).fetchone()[0] or 0)
+    except Exception:
+        return 0.0
+
+
+def employee_package(employee):
+    return (
+        float(employee["basic_salary"] or 0)
+        + float(employee["housing_allowance"] or 0)
+        + float(employee["transport_allowance"] or 0)
+        + float(employee["other_allowance"] or 0)
+    )
+
+
+def employee_stat_button(label, value, href, accent="#2563eb"):
+    return f"""
+    <a href="{href}" style="display:flex;align-items:center;gap:10px;min-width:150px;padding:12px 16px;border:1px solid #dbe4f0;border-radius:8px;background:#fff;text-decoration:none;color:#0b2d5b;">
+        <span style="width:34px;height:34px;border-radius:8px;background:{accent};color:white;display:flex;align-items:center;justify-content:center;font-weight:900;">#</span>
+        <span>
+            <span style="display:block;font-size:12px;color:#5f718d;font-weight:700;">{label}</span>
+            <span style="display:block;font-size:18px;font-weight:900;">{value}</span>
+        </span>
+    </a>
+    """
+
+
+def employee_profile_html(conn, employee, request_path):
+    employee_id = int(employee["id"])
+    full_name = safe(employee["name"])
+    initials = escape((full_name or "?")[:1].upper())
+    total_package = employee_package(employee)
+    payroll_count = q_count(conn, "SELECT COUNT(*) FROM payroll_lines WHERE employee_id = ?", (employee_id,))
+    advances_balance = q_sum(conn, """
+        SELECT COALESCE(SUM(balance), 0)
+        FROM employee_advances
+        WHERE employee_id = ?
+    """, (employee_id,))
+    custody_balance = q_sum(conn, """
+        SELECT COALESCE(SUM(l.debit - l.credit), 0)
+        FROM journal_lines l
+        JOIN journal_entries j ON j.id = l.journal_id
+        LEFT JOIN accounts a ON a.code = l.account_code
+        WHERE LOWER(COALESCE(j.status,'')) = 'posted'
+          AND LOWER(COALESCE(l.partner_type,'')) = 'employee'
+          AND COALESCE(l.partner_id,0) = ?
+          AND (COALESCE(a.name,'') LIKE '%عهد%' OR LOWER(COALESCE(a.name,'')) LIKE '%custody%')
+    """, (employee_id,))
+    status = '<span class="status-chip green">Active</span>' if int(employee["is_active"] or 0) == 1 else '<span class="status-chip gray">Inactive</span>'
+    smart_buttons = "".join([
+        employee_stat_button("Payroll", str(payroll_count), f"/ui/hr/payroll?employee_id={employee_id}", "#2563eb"),
+        employee_stat_button("Salary Package", money(total_package), f"/ui/hr/employees/{employee_id}/edit", "#0f766e"),
+        employee_stat_button("Advances", money(advances_balance), f"/ui/accounting/employee-advances?employee_id={employee_id}", "#dc2626"),
+        employee_stat_button("Custody", money(custody_balance), f"/ui/accounting/petty-cash/statement?employee_id={employee_id}", "#7c3aed"),
+        employee_stat_button("Ledger", "Open", f"/ui/accounting/partner-ledger?partner_type=employee&partner_id={employee_id}", "#f59e0b"),
+    ])
+
+    html = f"""
+    <div class="card">
+        <div class="toolbar">
+            <div>
+                <h2 style="margin:0;">Employee {escape(safe(employee['code']))}</h2>
+                <div style="color:#6f819d;margin-top:6px;">{escape(full_name)}</div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <a class="btn blue" href="/ui/hr/employees/{employee_id}/edit">Edit</a>
+                <a class="btn gray" href="/ui/hr/employees">Back</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:stretch;">
+        {smart_buttons}
+    </div>
+
+    <div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(300px,1fr);gap:18px;align-items:start;">
+        <div class="card">
+            <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
+                <div style="width:118px;height:118px;border-radius:8px;background:#2f5fb8;color:white;display:flex;align-items:center;justify-content:center;font-size:58px;font-weight:900;">{initials}</div>
+                <div style="flex:1;min-width:260px;">
+                    <div style="font-size:30px;font-weight:900;color:#0b2d5b;">{escape(full_name)}</div>
+                    <div style="margin-top:10px;color:#102a4c;line-height:1.8;">
+                        <div><b>Code:</b> {escape(safe(employee['code']))}</div>
+                        <div><b>Biometric:</b> {escape(safe(employee['biometric_code']))}</div>
+                        <div><b>Phone:</b> {escape(safe(employee['phone']))}</div>
+                        <div><b>Email:</b> {escape(safe(employee['email']))}</div>
+                        <div><b>Department:</b> {escape(safe(employee['department']))}</div>
+                        <div><b>Job Title:</b> {escape(safe(employee['job_title']))}</div>
+                        <div><b>Hire Date:</b> {escape(safe(employee['hire_date']))}</div>
+                        <div><b>National ID:</b> {escape(safe(employee['national_id']))}</div>
+                        <div><b>Payment Method:</b> {escape(safe(employee['payment_method']))}</div>
+                        <div><b>Bank:</b> {escape(safe(employee['bank_name']))} {escape(safe(employee['bank_account']))}</div>
+                        <div><b>Status:</b> {status}</div>
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-top:24px;border-top:1px solid #e5edf7;padding-top:18px;">
+                <h3 style="margin-top:0;">Payroll Setup</h3>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;color:#102a4c;">
+                    <div><b>Basic:</b> {money(employee['basic_salary'])}</div>
+                    <div><b>Housing:</b> {money(employee['housing_allowance'])}</div>
+                    <div><b>Transport:</b> {money(employee['transport_allowance'])}</div>
+                    <div><b>Other:</b> {money(employee['other_allowance'])}</div>
+                    <div><b>Insurance Salary:</b> {money(employee['insurance_salary'])}</div>
+                    <div><b>Daily Hours:</b> {money(employee['expected_daily_hours'])}</div>
+                </div>
+            </div>
+        </div>
+
+        <div>
+            {render_audit_log_card('employee', employee_id, 'Activity Log')}
+        </div>
+    </div>
+    """
+    return render_page(f"Employee {safe(employee['code'])}", html, "en", current_path=request_path)
 
 
 def employee_form_html(action, data=None):
@@ -454,6 +581,7 @@ def employees_list(request: Request):
             <td class="number-cell">{money(total_package)}</td>
             <td>{status_html}</td>
             <td>
+                <a class="btn gray" href="/ui/hr/employees/{r['id']}">Open</a>
                 <a class="btn blue" href="/ui/hr/employees/{r['id']}/edit">Edit</a>
                 <a class="btn red" href="/ui/hr/employees/{r['id']}/delete" onclick="return confirm('Are you sure you want to delete this employee? This action cannot be undone.')">Delete</a>
             </td>
@@ -529,6 +657,7 @@ def new_employee(request: Request):
 
 @router.post("/ui/hr/employees/new")
 def create_employee(
+    request: Request,
     code: str = Form(""),
     category_id: str = Form(""),
     biometric_code: str = Form(""),
@@ -558,7 +687,7 @@ def create_employee(
     conn = get_conn()
     employee_code = safe(code) or next_employee_code()
 
-    conn.execute(
+    cur = conn.execute(
         """
         INSERT INTO employees (
             code, category_id, biometric_code, name, phone, email, department, job_title, hire_date, national_id,
@@ -596,9 +725,31 @@ def create_employee(
             int(is_active or 0),
         ),
     )
+    safe_log_request_action(
+        request,
+        "employee",
+        int(cur.lastrowid),
+        "Created",
+        f"Employee {employee_code} - {safe(name)} created.",
+        conn=conn,
+        module="hr",
+    )
     conn.commit()
     conn.close()
     return RedirectResponse("/ui/hr/employees", status_code=302)
+
+
+@router.get("/ui/hr/employees/{employee_id}", response_class=HTMLResponse)
+def open_employee(request: Request, employee_id: int):
+    ensure_employees_table()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM employees WHERE id = ? LIMIT 1", (employee_id,)).fetchone()
+    if not row:
+        conn.close()
+        return HTMLResponse("Employee not found", status_code=404)
+    html = employee_profile_html(conn, row, str(request.url.path))
+    conn.close()
+    return HTMLResponse(html)
 
 
 @router.get("/ui/hr/employees/{employee_id}/delete", response_class=HTMLResponse)
@@ -657,6 +808,7 @@ def edit_employee(request: Request, employee_id: int):
 
 @router.post("/ui/hr/employees/{employee_id}/edit")
 def update_employee(
+    request: Request,
     employee_id: int,
     code: str = Form(""),
     category_id: str = Form(""),
@@ -749,10 +901,19 @@ def update_employee(
             employee_id,
         ),
     )
+    safe_log_request_action(
+        request,
+        "employee",
+        employee_id,
+        "Updated",
+        f"Employee {employee_code} - {safe(name)} updated.",
+        conn=conn,
+        module="hr",
+    )
     conn.commit()
     conn.close()
 
-    return RedirectResponse("/ui/hr/employees", status_code=302)
+    return RedirectResponse(f"/ui/hr/employees/{employee_id}", status_code=302)
 
 
 @router.get("/ui/hr/employees/template.csv")

@@ -1,9 +1,11 @@
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from html import escape
 
 from db import get_conn
 from layout import render_page
+from audit import render_audit_log_card, safe_log_request_action
 
 router = APIRouter()
 
@@ -126,6 +128,151 @@ def account_options(selected_code=None):
     return html
 
 
+def money(value):
+    try:
+        return f"{float(value or 0):,.2f}"
+    except Exception:
+        return "0.00"
+
+
+def q_count(conn, sql, params=()):
+    try:
+        return int(conn.execute(sql, params).fetchone()[0] or 0)
+    except Exception:
+        return 0
+
+
+def q_sum(conn, sql, params=()):
+    try:
+        return float(conn.execute(sql, params).fetchone()[0] or 0)
+    except Exception:
+        return 0.0
+
+
+def partner_balance(conn, partner_id, partner_type, account_code):
+    if not account_code:
+        return 0.0
+    return q_sum(conn, """
+        SELECT COALESCE(SUM(l.debit - l.credit), 0)
+        FROM journal_lines l
+        JOIN journal_entries j ON j.id = l.journal_id
+        WHERE LOWER(COALESCE(j.status,'')) = 'posted'
+          AND LOWER(COALESCE(l.partner_type,'')) = ?
+          AND COALESCE(l.partner_id,0) = ?
+          AND COALESCE(l.account_code,'') = ?
+    """, (partner_type, partner_id, account_code))
+
+
+def stat_button(label, value, href, accent="#2563eb"):
+    return f"""
+    <a href="{href}" style="display:flex;align-items:center;gap:10px;min-width:150px;padding:12px 16px;border:1px solid #dbe4f0;border-radius:8px;background:#fff;text-decoration:none;color:#0b2d5b;">
+        <span style="width:34px;height:34px;border-radius:8px;background:{accent};color:white;display:flex;align-items:center;justify-content:center;font-weight:900;">#</span>
+        <span>
+            <span style="display:block;font-size:12px;color:#5f718d;font-weight:700;">{label}</span>
+            <span style="display:block;font-size:18px;font-weight:900;">{value}</span>
+        </span>
+    </a>
+    """
+
+
+def partner_financial_stats(conn, partner):
+    partner_id = int(partner["id"])
+    partner_type = safe(partner["partner_type"]).lower()
+    account_code = safe(partner["account_code"])
+    balance = partner_balance(conn, partner_id, partner_type, account_code)
+
+    if partner_type == "customer":
+        invoices_count = q_count(conn, "SELECT COUNT(*) FROM customer_invoices WHERE customer_id = ?", (partner_id,))
+        invoices_total = q_sum(conn, "SELECT COALESCE(SUM(net_amount),0) FROM customer_invoices WHERE customer_id = ? AND LOWER(COALESCE(status,'')) = 'posted'", (partner_id,))
+        due_total = q_sum(conn, "SELECT COALESCE(SUM(net_amount),0) FROM customer_invoices WHERE customer_id = ? AND LOWER(COALESCE(status,'')) = 'posted' AND LOWER(COALESCE(payment_status,'')) <> 'paid'", (partner_id,))
+        receipts_count = q_count(conn, "SELECT COUNT(*) FROM cash_vouchers WHERE voucher_type = 'receipt' AND LOWER(COALESCE(party_type,'')) = 'customer' AND party_id = ?", (partner_id,))
+        return {
+            "balance": balance,
+            "buttons": [
+                ("Invoices", str(invoices_count), f"/ui/accounting/customer-invoices?customer_id={partner_id}", "#2563eb"),
+                ("Invoiced", money(invoices_total), f"/ui/accounting/customer-invoices?customer_id={partner_id}", "#0f766e"),
+                ("Due", money(due_total), f"/ui/accounting/customer-statement?customer_id={partner_id}", "#dc2626"),
+                ("Receipts", str(receipts_count), f"/ui/accounting/cash-receipts?party_type=customer&customer_id={partner_id}", "#7c3aed"),
+                ("Ledger", money(balance), f"/ui/accounting/partner-ledger?partner_type=customer&partner_id={partner_id}", "#f59e0b"),
+            ],
+        }
+
+    bills_count = q_count(conn, "SELECT COUNT(*) FROM vendor_bills WHERE vendor_id = ?", (partner_id,))
+    bills_total = q_sum(conn, "SELECT COALESCE(SUM(net_amount),0) FROM vendor_bills WHERE vendor_id = ? AND LOWER(COALESCE(status,'')) = 'posted'", (partner_id,))
+    due_total = q_sum(conn, "SELECT COALESCE(SUM(net_amount),0) FROM vendor_bills WHERE vendor_id = ? AND LOWER(COALESCE(status,'')) = 'posted' AND LOWER(COALESCE(payment_status,'')) <> 'paid'", (partner_id,))
+    payments_count = q_count(conn, "SELECT COUNT(*) FROM cash_vouchers WHERE voucher_type = 'payment' AND LOWER(COALESCE(party_type,'')) = 'vendor' AND party_id = ?", (partner_id,))
+    return {
+        "balance": balance,
+        "buttons": [
+            ("Bills", str(bills_count), f"/ui/accounting/vendor-bills?vendor_id={partner_id}", "#2563eb"),
+            ("Billed", money(bills_total), f"/ui/accounting/vendor-bills?vendor_id={partner_id}", "#0f766e"),
+            ("Due", money(due_total), f"/ui/accounting/vendor-statement?vendor_id={partner_id}", "#dc2626"),
+            ("Payments", str(payments_count), f"/ui/accounting/cash-payments?party_type=vendor&vendor_id={partner_id}", "#7c3aed"),
+            ("Ledger", money(balance), f"/ui/accounting/partner-ledger?partner_type=vendor&partner_id={partner_id}", "#f59e0b"),
+        ],
+    }
+
+
+def partner_profile_html(conn, partner, request_path):
+    partner_type = safe(partner["partner_type"]).lower()
+    title = "Customer" if partner_type == "customer" else "Vendor"
+    back_url = "/ui/accounting/customers" if partner_type == "customer" else "/ui/accounting/vendors"
+    stats = partner_financial_stats(conn, partner)
+    initials = escape((safe(partner["name"]) or "?")[:1].upper())
+    active = int(partner["is_active"] or 0) == 1
+    status = '<span class="status-chip green">Active</span>' if active else '<span class="status-chip gray">Inactive</span>'
+    smart_buttons = "".join(stat_button(label, value, href, color) for label, value, href, color in stats["buttons"])
+
+    details = f"""
+    <div class="card">
+        <div class="toolbar">
+            <div>
+                <h2 style="margin:0;">{title} {escape(safe(partner['code']))}</h2>
+                <div style="color:#6f819d;margin-top:6px;">{escape(safe(partner['name']))}</div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <a class="btn blue" href="/ui/accounting/partners/{partner['id']}/edit">Edit</a>
+                <a class="btn gray" href="{back_url}">Back</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:stretch;">
+        {smart_buttons}
+    </div>
+
+    <div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(300px,1fr);gap:18px;align-items:start;">
+        <div class="card">
+            <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
+                <div style="width:118px;height:118px;border-radius:8px;background:#2f5fb8;color:white;display:flex;align-items:center;justify-content:center;font-size:58px;font-weight:900;">{initials}</div>
+                <div style="flex:1;min-width:260px;">
+                    <div style="font-size:30px;font-weight:900;color:#0b2d5b;">{escape(safe(partner['name']))}</div>
+                    <div style="margin-top:10px;color:#102a4c;line-height:1.8;">
+                        <div><b>Code:</b> {escape(safe(partner['code']))}</div>
+                        <div><b>Phone:</b> {escape(safe(partner['phone']))}</div>
+                        <div><b>Email:</b> {escape(safe(partner['email']))}</div>
+                        <div><b>Tax No:</b> {escape(safe(partner['tax_no']))}</div>
+                        <div><b>Payment Term Days:</b> {escape(safe(partner['payment_term_days']))}</div>
+                        <div><b>Account:</b> {escape(safe(partner['account_code']))}</div>
+                        <div><b>Status:</b> {status}</div>
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-top:24px;border-top:1px solid #e5edf7;padding-top:18px;">
+                <h3 style="margin-top:0;">Address</h3>
+                <div style="color:#102a4c;white-space:pre-wrap;">{escape(safe(partner['address'])) or '-'}</div>
+            </div>
+        </div>
+
+        <div>
+            {render_audit_log_card('partner', int(partner['id']), 'Activity Log')}
+        </div>
+    </div>
+    """
+    return render_page(f"{title} {safe(partner['code'])}", details, current_path=request_path)
+
+
 def page_header(title: str, subtitle: str, new_href: str = "", new_label: str = "", back_href: str = ""):
     actions = ""
     if back_href:
@@ -170,6 +317,7 @@ def build_table_card(title: str, subtitle: str, partner_type: str, rows, request
             <td>{safe(r['payment_term_days'])}</td>
             <td>{active_badge}</td>
             <td style="white-space:nowrap;">
+                <a class="btn gray" href="/ui/accounting/partners/{r['id']}">Open</a>
                 <a class="btn blue" href="/ui/accounting/partners/{r['id']}/edit">Edit</a>
             </td>
         </tr>
@@ -333,7 +481,7 @@ async def save_customer(request: Request):
     code = next_partner_code("customer")
 
     conn = get_conn()
-    conn.execute("""
+    cur = conn.execute("""
         INSERT INTO partners (
             code, name, partner_type, phone, email, address,
             account_code, tax_no, payment_term_days, opening_balance, is_active
@@ -343,6 +491,15 @@ async def save_customer(request: Request):
         code, name, phone, email, address,
         account_code, tax_no, payment_term_days, opening_balance, is_active,
     ))
+    safe_log_request_action(
+        request,
+        "partner",
+        int(cur.lastrowid),
+        "Created",
+        f"Customer {code} created.",
+        conn=conn,
+        module="accounting",
+    )
     conn.commit()
     conn.close()
 
@@ -411,7 +568,7 @@ async def save_vendor(request: Request):
     code = next_partner_code("vendor")
 
     conn = get_conn()
-    conn.execute("""
+    cur = conn.execute("""
         INSERT INTO partners (
             code, name, partner_type, phone, email, address,
             account_code, tax_no, payment_term_days, opening_balance, is_active
@@ -421,10 +578,41 @@ async def save_vendor(request: Request):
         code, name, phone, email, address,
         account_code, tax_no, payment_term_days, opening_balance, is_active,
     ))
+    safe_log_request_action(
+        request,
+        "partner",
+        int(cur.lastrowid),
+        "Created",
+        f"Vendor {code} created.",
+        conn=conn,
+        module="accounting",
+    )
     conn.commit()
     conn.close()
 
     return RedirectResponse("/ui/accounting/vendors", status_code=303)
+
+
+# =========================
+# VIEW PARTNER PROFILE
+# =========================
+@router.get("/ui/accounting/partners/{partner_id}", response_class=HTMLResponse)
+def open_partner(request: Request, partner_id: int):
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT *
+        FROM partners
+        WHERE id = ?
+        LIMIT 1
+    """, (partner_id,)).fetchone()
+
+    if not row:
+        conn.close()
+        return HTMLResponse("Partner not found.", status_code=404)
+
+    html = partner_profile_html(conn, row, str(request.url.path))
+    conn.close()
+    return HTMLResponse(html)
 
 
 # =========================
@@ -516,7 +704,16 @@ async def update_partner(request: Request, partner_id: int):
         account_code, tax_no, payment_term_days,
         opening_balance, is_active, partner_id,
     ))
+    safe_log_request_action(
+        request,
+        "partner",
+        partner_id,
+        "Updated",
+        f"{partner_type.title()} {name} updated.",
+        conn=conn,
+        module="accounting",
+    )
     conn.commit()
     conn.close()
 
-    return RedirectResponse(back_url, status_code=303)
+    return RedirectResponse(f"/ui/accounting/partners/{partner_id}", status_code=303)
