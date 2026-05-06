@@ -139,7 +139,7 @@ def get_customer_partner_account_code(conn, customer_id):
     return safe(get_partner_account_code(conn, "customer", str(customer_id)))
 
 
-def get_opening_journal_balance(conn, customer_id, date_from):
+def get_opening_journal_balance(conn, customer_id, account_code, date_from):
     if not date_from:
         return Decimal("0.00")
     row = conn.execute("""
@@ -150,13 +150,14 @@ def get_opening_journal_balance(conn, customer_id, date_from):
         JOIN journal_entries j ON j.id = l.journal_id
         WHERE COALESCE(l.partner_id, 0) = ?
           AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
+          AND COALESCE(l.account_code,'') = ?
           AND LOWER(COALESCE(j.status,'')) = 'posted'
           AND COALESCE(j.entry_date,'') < ?
-    """, (customer_id, date_from)).fetchone()
+    """, (customer_id, account_code, date_from)).fetchone()
     return q2(D(row["total_debit"] if row else 0) - D(row["total_credit"] if row else 0))
 
 
-def get_journal_statement_rows(conn, customer_id, date_from="", date_to=""):
+def get_journal_statement_rows(conn, customer_id, account_code, date_from="", date_to=""):
     sql = """
         SELECT
             j.id AS journal_id,
@@ -174,9 +175,10 @@ def get_journal_statement_rows(conn, customer_id, date_from="", date_to=""):
         JOIN journal_entries j ON j.id = l.journal_id
         WHERE COALESCE(l.partner_id, 0) = ?
           AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
+          AND COALESCE(l.account_code,'') = ?
           AND LOWER(COALESCE(j.status,'')) = 'posted'
     """
-    params = [customer_id]
+    params = [customer_id, account_code]
 
     if safe(date_from):
         sql += " AND COALESCE(j.entry_date,'') >= ?"
@@ -190,10 +192,10 @@ def get_journal_statement_rows(conn, customer_id, date_from="", date_to=""):
     return conn.execute(sql, params).fetchall()
 
 
-def build_statement_rows(conn, customer_id, date_from="", date_to=""):
+def build_statement_rows(conn, customer_id, account_code, date_from="", date_to=""):
     rows = []
 
-    for r in get_journal_statement_rows(conn, customer_id, date_from, date_to):
+    for r in get_journal_statement_rows(conn, customer_id, account_code, date_from, date_to):
         ref_text = safe(r["reference"])
         status_text = safe(r["status"]) or "draft"
         source_type = safe(r["source_type"]).lower()
@@ -333,9 +335,14 @@ def customer_statement(
         conn.close()
         return HTMLResponse("Customer not found.", status_code=404)
 
-    opening_balance = q2(get_opening_journal_balance(conn, customer_id_int, date_from))
+    customer_account_code = get_customer_partner_account_code(conn, customer_id_int)
+    if not customer_account_code:
+        conn.close()
+        return HTMLResponse("Customer account is missing.", status_code=400)
 
-    rows = build_statement_rows(conn, customer_id_int, date_from, date_to)
+    opening_balance = q2(get_opening_journal_balance(conn, customer_id_int, customer_account_code, date_from))
+
+    rows = build_statement_rows(conn, customer_id_int, customer_account_code, date_from, date_to)
 
     body = ""
     running = opening_balance

@@ -547,8 +547,8 @@ def build_customer_invoice_journal_lines(bill, lines_rows, customer):
             "account_code": account_code,
             "debit": Decimal("0.00"),
             "credit": amount,
-            "partner_type": "customer",
-            "partner_id": bill["customer_id"],
+            "partner_type": None,
+            "partner_id": None,
         })
 
     vat_amount = Decimal(str(bill["vat_amount"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
@@ -558,8 +558,8 @@ def build_customer_invoice_journal_lines(bill, lines_rows, customer):
             "account_code": output_vat_account,
             "debit": Decimal("0.00"),
             "credit": vat_amount,
-            "partner_type": "customer",
-            "partner_id": bill["customer_id"],
+            "partner_type": None,
+            "partner_id": None,
         })
 
     net_amount = Decimal(str(bill["net_amount"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
@@ -579,8 +579,8 @@ def build_customer_invoice_journal_lines(bill, lines_rows, customer):
             "account_code": wht_receivable_account,
             "debit": wht_amount,
             "credit": Decimal("0.00"),
-            "partner_type": "customer",
-            "partner_id": bill["customer_id"],
+            "partner_type": None,
+            "partner_id": None,
         })
 
     total_debit = sum((Decimal(str(x["debit"])) for x in posting_lines), Decimal("0")).quantize(Decimal("1.00"))

@@ -269,9 +269,12 @@ def partner_ledger(
         
         # Check if user wants to filter by a specific account (passed via query)
         filter_account = request.query_params.get("account_code", "").strip()
+        effective_filter_account = filter_account
+        if not effective_filter_account and partner_type != "employee" and partner_account_code:
+            effective_filter_account = partner_account_code
 
         # Opening balance
-        opening_balance = get_opening_balance(conn, partner_type, partner_id, filter_account, date_from)
+        opening_balance = get_opening_balance(conn, partner_type, partner_id, effective_filter_account, date_from)
         balance = opening_balance
 
         sql = """
