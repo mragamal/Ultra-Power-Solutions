@@ -122,6 +122,65 @@ def module_for_path(path: str):
     return None
 
 
+def required_action_for_path(path: str, method: str):
+    path = (path or "").lower().rstrip("/")
+    method = (method or "").upper()
+    if path.startswith(("/static", "/uploads", "/favicon.ico", "/api/assistant")):
+        return None
+
+    if method == "GET":
+        if path.endswith("/edit"):
+            return "edit"
+        if path.endswith("/delete"):
+            return "delete"
+        return None
+
+    if method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+
+    last_part = path.rsplit("/", 1)[-1]
+    if method == "DELETE" or last_part in {"delete", "cancel"}:
+        return "delete"
+
+    if last_part in {
+        "post",
+        "final-post",
+        "reverse",
+        "unpost",
+        "approve",
+        "reject",
+        "submit-approval",
+        "decision",
+        "mark-disbursed",
+    }:
+        return "post"
+
+    if last_part in {"edit", "update", "toggle-active", "password", "permissions", "reset"}:
+        return "edit"
+
+    if last_part in {"new", "add", "create", "import", "apply", "save-draft"}:
+        return "create"
+
+    if last_part == "save":
+        return "write"
+
+    return "write"
+
+
+def can_write(request: Request, module_code: str) -> bool:
+    return any(can(request, module_code, action) for action in ("create", "edit", "delete", "approve", "post"))
+
+
+def has_required_action(request: Request, module_code: str, action: str) -> bool:
+    if not action:
+        return True
+    if action == "write":
+        return can_write(request, module_code)
+    if action == "post":
+        return can(request, module_code, "post") or can(request, module_code, "approve")
+    return can(request, module_code, action)
+
+
 def hydrate_session_from_cookie(request: Request):
     if request.scope.get("session"):
         return
@@ -166,6 +225,9 @@ async def auth_guard(request: Request, call_next):
     module_code = module_for_path(path)
     if module_code and not can(request, module_code, "view"):
         return RedirectResponse(default_home_path_for_user(request), status_code=302)
+    required_action = required_action_for_path(path, request.method)
+    if module_code and required_action and not has_required_action(request, module_code, required_action):
+        return HTMLResponse("Permission denied", status_code=403)
 
     response = await call_next(request)
     if should_audit_request(path, request.method):
