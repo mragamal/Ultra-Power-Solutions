@@ -1,3 +1,5 @@
+from html import escape
+
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -44,6 +46,38 @@ def roles_html_options(selected=""):
         sel = "selected" if (selected or "") == r["code"] else ""
         html += f'<option value="{r["code"]}" {sel}>{r["name"]}</option>'
     return html
+
+
+def roles_radio_options(selected=""):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT code, name
+        FROM roles
+        ORDER BY name
+    """).fetchall()
+    conn.close()
+
+    if not rows:
+        return '<div class="msg error">No roles found. Create a role first.</div>'
+
+    selected = (selected or "").strip() or (rows[0]["code"] or "")
+    html = '<div class="role-choice-grid">'
+    for r in rows:
+        code = r["code"] or ""
+        name = r["name"] or code
+        checked = "checked" if selected == code else ""
+        html += f"""
+        <label class="role-choice">
+            <input type="radio" name="role_code" value="{escape(code)}" {checked} required>
+            <span>{escape(name)}</span>
+        </label>
+        """
+    html += "</div>"
+    return html
+
+
+def role_exists(conn, role_code: str) -> bool:
+    return bool(conn.execute("SELECT 1 FROM roles WHERE code = ? LIMIT 1", ((role_code or "").strip(),)).fetchone())
 
 
 def checked_attr(value) -> str:
@@ -725,6 +759,29 @@ def users_list(request: Request):
 def new_user_form(request: Request):
     lang = get_lang(request)
     html = f"""
+    <style>
+        .role-choice-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 10px;
+        }}
+        .role-choice {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-height: 48px;
+            padding: 12px 14px;
+            border: 1px solid #d7e2f1;
+            border-radius: 10px;
+            background: #fff;
+            font-weight: 800;
+            cursor: pointer;
+        }}
+        .role-choice input {{
+            width: auto;
+            min-width: 18px;
+        }}
+    </style>
     <div class="card">
         <h2>New User</h2>
 
@@ -747,9 +804,7 @@ def new_user_form(request: Request):
                 </div>
                 <div class="col">
                     <label>Role</label>
-                    <select name="role_code" required>
-                        {roles_html_options()}
-                    </select>
+                    {roles_radio_options()}
                 </div>
             </div>
 
@@ -783,7 +838,17 @@ def create_user(
     is_active: int = Form(1),
 ):
     lang = get_lang(request)
+    role_code = (role_code or "").strip()
     conn = get_conn()
+
+    if not role_exists(conn, role_code):
+        conn.close()
+        return HTMLResponse(render_page(
+            "New User",
+            '<div class="card"><h2>New User</h2><p style="color:red;">Please select a valid role.</p><a class="btn gray" href="/ui/system/users/new">Back</a></div>',
+            lang,
+            current_path=request.url.path
+        ), status_code=400)
 
     exists = conn.execute("""
         SELECT id FROM users WHERE username = ? LIMIT 1
@@ -805,14 +870,14 @@ def create_user(
         (username or "").strip(),
         (full_name or "").strip(),
         hash_password(password),
-        (role_code or "").strip(),
+        role_code,
         int(is_active or 0),
     ))
     user_id = conn.execute("SELECT last_insert_rowid() AS user_id").fetchone()["user_id"]
     conn.commit()
     conn.close()
 
-    copy_role_permissions_to_user(user_id, (role_code or "").strip())
+    copy_role_permissions_to_user(user_id, role_code)
     return RedirectResponse(f"/ui/system/users/{user_id}/permissions", status_code=302)
 
 
@@ -888,6 +953,29 @@ def edit_user_form(request: Request, user_id: int):
     inactive_selected = "selected" if int(user["is_active"] or 0) == 0 else ""
 
     html = f"""
+    <style>
+        .role-choice-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 10px;
+        }}
+        .role-choice {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-height: 48px;
+            padding: 12px 14px;
+            border: 1px solid #d7e2f1;
+            border-radius: 10px;
+            background: #fff;
+            font-weight: 800;
+            cursor: pointer;
+        }}
+        .role-choice input {{
+            width: auto;
+            min-width: 18px;
+        }}
+    </style>
     <div class="card">
         <h2>Edit User</h2>
 
@@ -906,9 +994,7 @@ def edit_user_form(request: Request, user_id: int):
             <div class="row" style="margin-top:14px;">
                 <div class="col">
                     <label>Role</label>
-                    <select name="role_code" required>
-                        {roles_html_options(user['role_code'] or '')}
-                    </select>
+                    {roles_radio_options(user['role_code'] or '')}
                 </div>
                 <div class="col">
                     <label>Status</label>
@@ -959,6 +1045,7 @@ def update_user(
     is_active: int = Form(1),
 ):
     current = current_user(request) or {}
+    role_code = (role_code or "").strip()
     if int(current.get("user_id") or 0) == int(user_id):
         is_active = 1
 
@@ -976,6 +1063,15 @@ def update_user(
         conn.close()
         return HTMLResponse("User not found", status_code=404)
 
+    if not role_exists(conn, role_code):
+        conn.close()
+        return HTMLResponse(render_page(
+            "Edit User",
+            f'<div class="card"><h2>Edit User</h2><p style="color:red;">Please select a valid role.</p><a class="btn gray" href="/ui/system/users/{user_id}/edit">Back</a></div>',
+            get_lang(request),
+            current_path=request.url.path
+        ), status_code=400)
+
     if duplicate:
         conn.close()
         return HTMLResponse(render_page(
@@ -992,7 +1088,7 @@ def update_user(
     """, (
         (username or "").strip(),
         (full_name or "").strip(),
-        (role_code or "").strip(),
+        role_code,
         int(is_active or 0),
         user_id,
     ))
