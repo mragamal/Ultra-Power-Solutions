@@ -348,8 +348,6 @@ def can(request, module_code: str, action: str = "view") -> bool:
 
     user_id = user.get("user_id")
     role_code = user.get("role_code") or ""
-    if role_code == "admin":
-        return True
 
     perms = get_effective_permissions(user_id, role_code)
     module_perm = perms.get(module_code, {})
