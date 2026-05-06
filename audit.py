@@ -1,6 +1,17 @@
 from db import get_conn
 from datetime import datetime
 from html import escape
+from zoneinfo import ZoneInfo
+
+
+AUDIT_TIMEZONE = "Africa/Cairo"
+
+
+def audit_now() -> str:
+    try:
+        return datetime.now(ZoneInfo(AUDIT_TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _table_columns(conn, table_name: str) -> set[str]:
@@ -106,7 +117,7 @@ def log_action(
         action,
         notes,
         done_by,
-        done_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        done_at or audit_now(),
         user_id,
         username,
         module,
