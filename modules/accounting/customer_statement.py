@@ -133,7 +133,7 @@ def get_customer_name(conn, customer_id):
 
 
 # =========================================================
-# OPENING / MOVEMENTS FROM DOCUMENTS + JOURNAL
+# OPENING / MOVEMENTS FROM POSTED JOURNAL ONLY
 # =========================================================
 def get_customer_partner_account_code(conn, customer_id):
     return safe(get_partner_account_code(conn, "customer", str(customer_id)))
@@ -151,104 +151,17 @@ def get_opening_journal_balance(conn, customer_id, date_from):
         WHERE COALESCE(l.partner_id, 0) = ?
           AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
           AND LOWER(COALESCE(j.status,'')) = 'posted'
-          AND LOWER(COALESCE(j.source_type,'')) NOT IN ('customer_bill', 'customer_invoice', 'customer_payment', 'cash_receipt')
           AND COALESCE(j.entry_date,'') < ?
     """, (customer_id, date_from)).fetchone()
     return q2(D(row["total_debit"] if row else 0) - D(row["total_credit"] if row else 0))
 
 
-def get_opening_invoice_balance(conn, customer_id, date_from):
-    if not date_from:
-        return Decimal("0.00")
-    row = conn.execute("""
-        SELECT COALESCE(SUM(net_amount), 0) AS total_net
-        FROM customer_invoices
-        WHERE customer_id = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-          AND COALESCE(invoice_date,'') < ?
-    """, (customer_id, date_from)).fetchone()
-    return q2(row["total_net"] if row else 0)
-
-
-def get_opening_receipt_balance(conn, customer_id, date_from):
-    if not date_from:
-        return Decimal("0.00")
-    row = conn.execute("""
-        SELECT COALESCE(SUM(amount), 0) AS total_paid
-        FROM cash_vouchers
-        WHERE LOWER(COALESCE(voucher_type,'')) = 'receipt'
-          AND LOWER(COALESCE(party_type,'')) = 'customer'
-          AND COALESCE(party_id, 0) = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-          AND COALESCE(voucher_date,'') < ?
-    """, (customer_id, date_from)).fetchone()
-    return q2(row["total_paid"] if row else 0)
-
-
-def get_invoice_rows(conn, customer_id, date_from="", date_to=""):
-    sql = """
-        SELECT
-            id,
-            invoice_no AS ref_no,
-            invoice_date AS trx_date,
-            due_date,
-            description,
-            net_amount,
-            total_amount,
-            vat_amount,
-            wht_amount,
-            payment_status,
-            status
-        FROM customer_invoices
-        WHERE customer_id = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-    """
-    params = [customer_id]
-
-    if safe(date_from):
-        sql += " AND COALESCE(invoice_date,'') >= ?"
-        params.append(date_from)
-
-    if safe(date_to):
-        sql += " AND COALESCE(invoice_date,'') <= ?"
-        params.append(date_to)
-
-    sql += " ORDER BY invoice_date, id"
-    return conn.execute(sql, params).fetchall()
-
-
-def get_receipt_rows(conn, customer_id, date_from="", date_to=""):
-    sql = """
-        SELECT
-            id,
-            voucher_no AS ref_no,
-            voucher_date AS trx_date,
-            description,
-            amount
-        FROM cash_vouchers
-        WHERE LOWER(COALESCE(voucher_type,'')) = 'receipt'
-          AND LOWER(COALESCE(party_type,'')) = 'customer'
-          AND COALESCE(party_id, 0) = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-    """
-    params = [customer_id]
-
-    if safe(date_from):
-        sql += " AND COALESCE(voucher_date,'') >= ?"
-        params.append(date_from)
-
-    if safe(date_to):
-        sql += " AND COALESCE(voucher_date,'') <= ?"
-        params.append(date_to)
-
-    sql += " ORDER BY voucher_date, id"
-    return conn.execute(sql, params).fetchall()
-
-
-def get_manual_journal_rows(conn, customer_id, date_from="", date_to=""):
+def get_journal_statement_rows(conn, customer_id, date_from="", date_to=""):
     sql = """
         SELECT
             j.id AS journal_id,
+            j.source_type,
+            j.source_id,
             j.entry_date AS trx_date,
             j.entry_no AS ref_no,
             j.reference,
@@ -262,7 +175,6 @@ def get_manual_journal_rows(conn, customer_id, date_from="", date_to=""):
         WHERE COALESCE(l.partner_id, 0) = ?
           AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
           AND LOWER(COALESCE(j.status,'')) = 'posted'
-          AND LOWER(COALESCE(j.source_type,'')) NOT IN ('customer_bill', 'customer_invoice', 'customer_payment', 'cash_receipt')
     """
     params = [customer_id]
 
@@ -281,36 +193,18 @@ def get_manual_journal_rows(conn, customer_id, date_from="", date_to=""):
 def build_statement_rows(conn, customer_id, date_from="", date_to=""):
     rows = []
 
-    for r in get_invoice_rows(conn, customer_id, date_from, date_to):
-        rows.append({
-            "trx_date": safe(r["trx_date"]),
-            "trx_type": "Invoice",
-            "ref_no": safe(r["ref_no"]),
-            "description": safe(r["description"]) or f"Customer Invoice {safe(r['ref_no'])}",
-            "debit": q2(r["net_amount"]),
-            "credit": Decimal("0.00"),
-            "extra": f"Due: {safe(r['due_date'])} | Payment Status: {safe(r['payment_status'])}",
-            "open_link": f"/ui/accounting/customer-invoices/{r['id']}/view",
-        })
-
-    for r in get_receipt_rows(conn, customer_id, date_from, date_to):
-        rows.append({
-            "trx_date": safe(r["trx_date"]),
-            "trx_type": "Receipt",
-            "ref_no": safe(r["ref_no"]),
-            "description": safe(r["description"]) or f"Cash Receipt {safe(r['ref_no'])}",
-            "debit": Decimal("0.00"),
-            "credit": q2(r["amount"]),
-            "extra": "Cash Receipt Voucher",
-            "open_link": f"/ui/accounting/cash-receipts/{r['id']}",
-        })
-
-    for r in get_manual_journal_rows(conn, customer_id, date_from, date_to):
+    for r in get_journal_statement_rows(conn, customer_id, date_from, date_to):
         ref_text = safe(r["reference"])
         status_text = safe(r["status"]) or "draft"
+        source_type = safe(r["source_type"]).lower()
+        trx_type = "Journal"
+        if source_type in ("customer_invoice", "customer_bill"):
+            trx_type = "Invoice Journal"
+        elif source_type in ("cash_receipt", "customer_payment"):
+            trx_type = "Receipt Journal"
         rows.append({
             "trx_date": safe(r["trx_date"]),
-            "trx_type": "Journal" if status_text == "posted" else f"Journal ({status_text})",
+            "trx_type": trx_type if status_text == "posted" else f"{trx_type} ({status_text})",
             "ref_no": safe(r["ref_no"]),
             "description": safe(r["description"]) or f"Journal {ref_text or safe(r['ref_no'])}",
             "debit": q2(r["debit"]),
@@ -439,7 +333,7 @@ def customer_statement(
         conn.close()
         return HTMLResponse("Customer not found.", status_code=404)
 
-    opening_balance = q2(get_opening_journal_balance(conn, customer_id_int, date_from) + get_opening_invoice_balance(conn, customer_id_int, date_from) - get_opening_receipt_balance(conn, customer_id_int, date_from))
+    opening_balance = q2(get_opening_journal_balance(conn, customer_id_int, date_from))
 
     rows = build_statement_rows(conn, customer_id_int, date_from, date_to)
 

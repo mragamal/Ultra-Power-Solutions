@@ -463,6 +463,16 @@ def get_expense_payment(conn, expense_id: int):
     ).fetchone()
 
 
+def row_journal_status(conn, journal_id):
+    if not journal_id:
+        return "draft"
+    row = conn.execute(
+        "SELECT status FROM journal_entries WHERE id = ? LIMIT 1",
+        (journal_id,),
+    ).fetchone()
+    return safe(row["status"]).lower() if row else "draft"
+
+
 def get_expense_journal_status(expense_row):
     if not expense_row or not expense_row["journal_id"]:
         return "draft"
@@ -483,6 +493,33 @@ def get_expense_journal_status(expense_row):
 
 def expense_can_edit_before_final(expense_row):
     return get_expense_journal_status(expense_row) in ("draft", "pending_final_post")
+
+
+def expense_payment_can_modify(conn, payment_row):
+    if not payment_row:
+        return True
+    if safe(payment_row["status"]).lower() == "reversed":
+        return True
+    return row_journal_status(conn, payment_row["journal_id"]) in ("", "draft", "pending_final_post")
+
+
+def expense_can_manage(conn, expense_row):
+    if not expense_row:
+        return False
+    if not expense_can_edit_before_final(expense_row):
+        return False
+    return expense_payment_can_modify(conn, get_expense_payment(conn, expense_row["id"]))
+
+
+def delete_linked_draft_payment(conn, payment_row):
+    if not payment_row:
+        return
+    if not expense_payment_can_modify(conn, payment_row):
+        raise Exception("Linked cash payment is final posted and cannot be deleted.")
+    if payment_row["journal_id"]:
+        delete_draft_journal_entry(conn, payment_row["journal_id"])
+    conn.execute("DELETE FROM cash_voucher_attachments WHERE voucher_id = ?", (payment_row["id"],))
+    conn.execute("DELETE FROM cash_vouchers WHERE id = ?", (payment_row["id"],))
 
 
 # =========================================================
@@ -976,12 +1013,11 @@ def open_expense(request: Request, expense_id: int):
     lines = get_expense_lines(conn, expense_id)
     payment = get_expense_payment(conn, expense_id)
     attachments_html = attachment_gallery(expense_attachments(conn, expense_id))
+    journal_status = get_expense_journal_status(expense)
+    is_manageable = expense_can_manage(conn, expense)
     conn.close()
 
     logs = safe_get_logs("expense", expense_id)
-
-    journal_status = get_expense_journal_status(expense)
-    is_editable = expense_can_edit_before_final(expense)
 
     lines_html = ""
     for l in lines:
@@ -1017,7 +1053,14 @@ def open_expense(request: Request, expense_id: int):
         logs_html = "<div>No activity log found.</div>"
 
     has_payment = bool(payment)
-    edit_btn = f'<a class="btn blue" href="/ui/accounting/expenses/{expense_id}/edit">Edit</a>' if is_editable and not has_payment else ""
+    edit_btn = f'<a class="btn blue" href="/ui/accounting/expenses/{expense_id}/edit">Edit</a>' if is_manageable else ""
+    delete_btn = ""
+    if is_manageable:
+        delete_btn = f"""
+        <form method="post" action="/ui/accounting/expenses/{expense_id}/delete" style="display:inline;" onsubmit="return confirm('Delete this draft expense?');">
+            <button class="btn red" type="submit">Delete</button>
+        </form>
+        """
 
     post_btn = ""
 
@@ -1049,6 +1092,7 @@ def open_expense(request: Request, expense_id: int):
         <div style="margin-top:20px;">
             {edit_btn}
             {post_btn}
+            {delete_btn}
             <a class="btn gray" href="/ui/accounting/expenses">Back</a>
         </div>
     </div>
@@ -1088,12 +1132,7 @@ def edit_expense(request: Request, expense_id: int):
         conn.close()
         return HTMLResponse("Expense not found", status_code=404)
 
-    if get_expense_payment(conn, expense_id):
-        conn.close()
-        return RedirectResponse(f"/ui/accounting/expenses/{expense_id}", status_code=302)
-
-    journal_status = get_expense_journal_status(expense)
-    if not expense_can_edit_before_final(expense):
+    if not expense_can_manage(conn, expense):
         conn.close()
         return RedirectResponse(f"/ui/accounting/expenses/{expense_id}", status_code=302)
 
@@ -1140,8 +1179,7 @@ async def update_expense(request: Request, expense_id: int):
         return HTMLResponse("Expense not found", status_code=404)
 
     existing_attachments = expense_attachments(conn, expense_id)
-    journal_status = get_expense_journal_status(expense)
-    if not expense_can_edit_before_final(expense):
+    if not expense_can_manage(conn, expense):
         conn.close()
         return RedirectResponse(f"/ui/accounting/expenses/{expense_id}", status_code=302)
 
@@ -1252,7 +1290,19 @@ async def update_expense(request: Request, expense_id: int):
         """, (float(total), expense_id))
         insert_expense_attachments(conn, expense_id, new_attachments)
 
-        new_journal_id = None
+        payment = get_expense_payment(conn, expense_id)
+        if payment:
+            delete_linked_draft_payment(conn, payment)
+            conn.execute(
+                """
+                UPDATE expenses
+                SET status = 'pending_payment',
+                    journal_id = NULL,
+                    payment_account_code = NULL
+                WHERE id = ?
+                """,
+                (expense_id,),
+            )
         conn.commit()
 
     except Exception as e:
@@ -1283,6 +1333,32 @@ async def update_expense(request: Request, expense_id: int):
 @router.post("/ui/accounting/expenses/{expense_id}/post")
 def post_expense(expense_id: int):
     return RedirectResponse(f"/ui/accounting/expenses/{expense_id}", status_code=302)
+
+
+@router.post("/ui/accounting/expenses/{expense_id}/delete")
+def delete_expense(request: Request, expense_id: int):
+    conn = get_conn()
+    try:
+        expense = get_expense(conn, expense_id)
+        if not expense:
+            raise Exception("Expense not found")
+        if not expense_can_manage(conn, expense):
+            raise Exception("Only draft or non-final expenses can be deleted.")
+        payment = get_expense_payment(conn, expense_id)
+        delete_linked_draft_payment(conn, payment)
+        if expense["journal_id"]:
+            delete_draft_journal_entry(conn, expense["journal_id"])
+        conn.execute("DELETE FROM expense_attachments WHERE expense_id = ?", (expense_id,))
+        conn.execute("DELETE FROM expense_lines WHERE expense_id = ?", (expense_id,))
+        conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return HTMLResponse(f"Delete failed: {str(e)}", status_code=400)
+    conn.close()
+    safe_log("expense", expense_id, "delete", f"Expense {expense_id} deleted.", "admin")
+    return RedirectResponse("/ui/accounting/expenses", status_code=302)
 
 
 @router.post("/ui/accounting/expenses/{expense_id}/reverse")
