@@ -926,7 +926,8 @@ def sync_customer_invoice_from_journal(conn, journal_id: int, invoice_id: int):
             wht_rate = ?,
             wht_amount = ?,
             total_amount = ?,
-            net_amount = ?
+            net_amount = ?,
+            status = 'posted'
         WHERE id = ?
     """, (
         safe(entry["reference"]) or safe(invoice["invoice_no"]),
@@ -1063,7 +1064,8 @@ def sync_vendor_bill_from_journal(conn, journal_id: int, bill_id: int):
             wht_rate = ?,
             wht_amount = ?,
             total_amount = ?,
-            net_amount = ?
+            net_amount = ?,
+            status = 'posted'
         WHERE id = ?
     """, (
         safe(entry["reference"]) or safe(bill["bill_no"]),
@@ -1128,6 +1130,7 @@ def post_journal_entry(conn, journal_id: int):
         SET status = 'posted'
         WHERE id = ?
     """, (journal_id,))
+    sync_source_document_from_journal(conn, journal_id)
 
 
 def reverse_journal_entry(conn, journal_id: int):
