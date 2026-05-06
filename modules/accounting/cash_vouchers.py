@@ -527,7 +527,7 @@ def get_employee_custody_requests_api(request: Request, employee_id: int):
         SELECT id, request_no, request_date, amount, notes, status
         FROM employee_custody_requests
         WHERE employee_id = ?
-          AND LOWER(COALESCE(status, 'active')) = 'active'
+          AND LOWER(COALESCE(status, 'active')) IN ('active', 'pending', 'open')
           AND NOT EXISTS (
               SELECT 1
               FROM cash_vouchers v
@@ -592,6 +592,40 @@ def is_employee_custody_request_payment(voucher_type: str, party_type: str, empl
         and safe(employee_trans_type).lower() == "custody"
         and safe_int(custody_request_id) > 0
     )
+
+
+def find_available_custody_request(conn, employee_id, amount=None, exclude_voucher_id=0):
+    employee_id = safe_int(employee_id)
+    if employee_id <= 0:
+        return None
+    params = [employee_id, safe_int(exclude_voucher_id)]
+    amount_filter = ""
+    amount_value = q2(amount)
+    if amount_value > Decimal("0.00"):
+        amount_filter = "AND ABS(COALESCE(r.amount, 0) - ?) < 0.005"
+        params.append(float(amount_value))
+    rows = conn.execute(
+        f"""
+        SELECT r.*, e.code AS employee_code, e.name AS employee_name
+        FROM employee_custody_requests r
+        LEFT JOIN employees e ON e.id = r.employee_id
+        WHERE r.employee_id = ?
+          AND LOWER(COALESCE(r.status, 'active')) IN ('active', 'pending', 'open')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM cash_vouchers v
+              WHERE COALESCE(v.custody_request_id, 0) = r.id
+                AND LOWER(COALESCE(v.voucher_type,'')) = 'payment'
+                AND LOWER(COALESCE(v.employee_trans_type,'')) = 'custody'
+                AND LOWER(COALESCE(v.status,'')) <> 'reversed'
+                AND v.id <> ?
+          )
+          {amount_filter}
+        ORDER BY r.request_date DESC, r.id DESC
+        """,
+        tuple(params),
+    ).fetchall()
+    return rows[0] if len(rows) == 1 else None
 
 
 def voucher_journal_status(conn, voucher) -> str:
@@ -885,6 +919,12 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
         and safe_int(values.get("custody_request_id")) > 0
         and safe(values.get("locked_custody_request")) == "1"
     )
+    request_backed_custody_payment = is_employee_custody_request_payment(
+        voucher_type,
+        party_type,
+        values.get("employee_trans_type"),
+        values.get("custody_request_id"),
+    )
     manual_party_display = "block" if party_type not in ("customer", "vendor", "employee") else "none"
     customer_display = "block" if party_type == "customer" else "none"
     vendor_display = "block" if party_type == "vendor" else "none"
@@ -974,9 +1014,10 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
     """
     attachments = values.get("attachments") or []
     existing_attachment_html = attachment_gallery(attachments) if attachments else ""
-    attachment_required = "required" if voucher_type == "payment" and not locked_custody_request and not attachments else ""
+    attachment_not_needed = locked_custody_request or request_backed_custody_payment
+    attachment_required = "required" if voucher_type == "payment" and not attachment_not_needed and not attachments else ""
     attachment_html = ""
-    if voucher_type == "payment" and not locked_custody_request:
+    if voucher_type == "payment" and not attachment_not_needed:
         attachment_html = f"""
             <div class="row" style="margin-top:14px;">
                 <div class="col">
@@ -1611,9 +1652,31 @@ def save_voucher(
     conn = None
     try:
         conn = get_conn()
+        if (
+            voucher_type == "payment"
+            and safe(party_type).lower() == "employee"
+            and safe(employee_trans_type).lower() == "custody"
+            and safe_int(custody_request_id) <= 0
+        ):
+            req = find_available_custody_request(conn, employee_id, amount)
+            if req:
+                custody_request_id = safe(req["id"])
+                values["custody_request_id"] = custody_request_id
+                amount = str(float(req["amount"] or 0))
+                values["amount"] = amount
+                emp_label = f"{safe(req['employee_code'])} - {safe(req['employee_name'])}".strip(" -")
+                if not safe(description):
+                    description = f"{tr(lang, 'Disburse custody no.', 'صرف عهدة رقم')} {safe(req['request_no'])} {tr(lang, 'to employee', 'للموظف')} {emp_label}"
+                    values["description"] = description
         new_attachments = save_voucher_uploads(voucher_attachments)
         attachment_not_required = is_employee_custody_request_payment(voucher_type, party_type, employee_trans_type, custody_request_id)
-        if voucher_type == "payment" and not attachment_not_required and not new_attachments:
+        waiting_for_custody_request = (
+            voucher_type == "payment"
+            and safe(party_type).lower() == "employee"
+            and safe(employee_trans_type).lower() == "custody"
+            and safe_int(custody_request_id) <= 0
+        )
+        if voucher_type == "payment" and not attachment_not_required and not waiting_for_custody_request and not new_attachments:
             raise Exception("Attachment is required for cash payment vouchers.")
         source_type = safe(source_type).lower()
         selected_source_id = safe_int(source_id)
@@ -1750,7 +1813,7 @@ def save_voucher(
                     FROM employee_custody_requests
                     WHERE id = ?
                       AND employee_id = ?
-                      AND LOWER(COALESCE(status, 'active')) = 'active'
+                      AND LOWER(COALESCE(status, 'active')) IN ('active', 'pending', 'open')
                       AND NOT EXISTS (
                           SELECT 1
                           FROM cash_vouchers v
@@ -2077,10 +2140,29 @@ def update_voucher(
             return HTMLResponse(tr(lang, "Voucher not found", "السند غير موجود"), status_code=404)
         if not voucher_can_modify(conn, voucher):
             return RedirectResponse(f"{route_base(voucher_type)}?msg=" + quote("Final posted vouchers cannot be edited."), status_code=302)
+        if (
+            voucher_type == "payment"
+            and safe(party_type).lower() == "employee"
+            and safe(employee_trans_type).lower() == "custody"
+            and safe_int(custody_request_id) <= 0
+        ):
+            req = find_available_custody_request(conn, employee_id, amount, exclude_voucher_id=voucher_id)
+            if req:
+                custody_request_id = safe(req["id"])
+                amount = str(float(req["amount"] or 0))
+                emp_label = f"{safe(req['employee_code'])} - {safe(req['employee_name'])}".strip(" -")
+                if not safe(description):
+                    description = f"{tr(lang, 'Disburse custody no.', 'صرف عهدة رقم')} {safe(req['request_no'])} {tr(lang, 'to employee', 'للموظف')} {emp_label}"
         existing_attachments = load_voucher_attachments(conn, voucher_id)
         new_attachments = save_voucher_uploads(voucher_attachments)
         attachment_not_required = is_employee_custody_request_payment(voucher_type, party_type, employee_trans_type, custody_request_id)
-        if voucher_type == "payment" and not attachment_not_required and not existing_attachments and not new_attachments:
+        waiting_for_custody_request = (
+            voucher_type == "payment"
+            and safe(party_type).lower() == "employee"
+            and safe(employee_trans_type).lower() == "custody"
+            and safe_int(custody_request_id) <= 0
+        )
+        if voucher_type == "payment" and not attachment_not_required and not waiting_for_custody_request and not existing_attachments and not new_attachments:
             raise Exception("Attachment is required for cash payment vouchers.")
         source_type = safe(source_type).lower()
         selected_source_id = safe_int(source_id)
@@ -2144,6 +2226,8 @@ def update_voucher(
         party_type, party_id, party_name, counter_account_code = normalize_party_data(
             conn, voucher_type, party_type, party_name, customer_id, vendor_id, employee_id, employee_trans_type, counter_account_code
         )
+        if voucher_type == "payment" and party_type == "employee" and safe(employee_trans_type).lower() == "custody" and safe_int(custody_request_id) <= 0:
+            raise Exception("Please select a custody request.")
         if source_type != "expense" and voucher_type == "payment" and party_type in ("vendor", "other") and expense_payment_source == "custody":
             if selected_expense_employee_id <= 0:
                 raise Exception("Please select the employee whose custody will pay this vendor.")
