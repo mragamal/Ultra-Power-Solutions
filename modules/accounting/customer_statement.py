@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse
 from db import get_conn
 from layout import render_page
 from i18n import get_lang
-from modules.accounting.partner_ledger import get_partner_account_code, get_opening_balance as get_partner_opening_balance
+from modules.accounting.partner_ledger import get_partner_account_code
 
 router = APIRouter()
 
@@ -139,26 +139,46 @@ def get_customer_partner_account_code(conn, customer_id):
     return safe(get_partner_account_code(conn, "customer", str(customer_id)))
 
 
+def customer_journal_match_sql():
+    # Older invoice journals may have been posted before partner_id was stored
+    # on the receivable line. The statement still reads posted journal lines
+    # only, but can infer the customer from the invoice linked to that journal.
+    return """
+      AND COALESCE(l.account_code,'') = ?
+      AND (
+            (
+                COALESCE(l.partner_id, 0) = ?
+                AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM customer_invoices ci
+                WHERE ci.journal_id = j.id
+                  AND COALESCE(ci.customer_id, 0) = ?
+            )
+      )
+      AND LOWER(COALESCE(j.status,'')) = 'posted'
+    """
+
+
 def get_opening_journal_balance(conn, customer_id, account_code, date_from):
     if not date_from:
         return Decimal("0.00")
-    row = conn.execute("""
+    row = conn.execute(f"""
         SELECT
             COALESCE(SUM(l.debit), 0) AS total_debit,
             COALESCE(SUM(l.credit), 0) AS total_credit
         FROM journal_lines l
         JOIN journal_entries j ON j.id = l.journal_id
-        WHERE COALESCE(l.partner_id, 0) = ?
-          AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
-          AND COALESCE(l.account_code,'') = ?
-          AND LOWER(COALESCE(j.status,'')) = 'posted'
+        WHERE 1 = 1
+        {customer_journal_match_sql()}
           AND COALESCE(j.entry_date,'') < ?
-    """, (customer_id, account_code, date_from)).fetchone()
+    """, (account_code, customer_id, customer_id, date_from)).fetchone()
     return q2(D(row["total_debit"] if row else 0) - D(row["total_credit"] if row else 0))
 
 
 def get_journal_statement_rows(conn, customer_id, account_code, date_from="", date_to=""):
-    sql = """
+    sql = f"""
         SELECT
             j.id AS journal_id,
             j.source_type,
@@ -173,12 +193,10 @@ def get_journal_statement_rows(conn, customer_id, account_code, date_from="", da
             COALESCE(l.credit, 0) AS credit
         FROM journal_lines l
         JOIN journal_entries j ON j.id = l.journal_id
-        WHERE COALESCE(l.partner_id, 0) = ?
-          AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
-          AND COALESCE(l.account_code,'') = ?
-          AND LOWER(COALESCE(j.status,'')) = 'posted'
+        WHERE 1 = 1
+        {customer_journal_match_sql()}
     """
-    params = [customer_id, account_code]
+    params = [account_code, customer_id, customer_id]
 
     if safe(date_from):
         sql += " AND COALESCE(j.entry_date,'') >= ?"
