@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from db import get_conn
 from layout import render_page
+from i18n import get_lang
 from modules.accounting.allocation_engine import get_document_open_amount
 
 router = APIRouter()
@@ -42,6 +43,29 @@ def partners_api(partner_type: str = ""):
 
     conn.close()
     return JSONResponse({"items": items})
+
+
+def partner_options(conn, partner_type: str, selected_id: str = ""):
+    partner_type = (partner_type or "").strip().lower()
+    selected_id = str(selected_id or "").strip()
+
+    if partner_type not in ("customer", "vendor"):
+        return "<option value=''>Select Partner</option>"
+
+    rows = conn.execute("""
+        SELECT id, code, name
+        FROM partners
+        WHERE LOWER(COALESCE(partner_type,'')) = ?
+          AND COALESCE(is_active,1) = 1
+        ORDER BY name
+    """, (partner_type,)).fetchall()
+
+    html = "<option value=''>All Partners</option>"
+    for r in rows:
+        label = f"{r['code']} - {r['name']}" if r["code"] else (r["name"] or "")
+        selected = "selected" if selected_id == str(r["id"]) else ""
+        html += f"<option value='{r['id']}' {selected}>{label}</option>"
+    return html
 
 
 # =========================
@@ -295,6 +319,7 @@ def aging_page(
     as_of: str = "",
     embed: int = 0,
 ):
+    lang = get_lang(request)
     conn = get_conn()
 
     partner_type = (partner_type or "").strip().lower()
@@ -315,6 +340,7 @@ def aging_page(
 
     customer_selected = "selected" if partner_type == "customer" else ""
     vendor_selected = "selected" if partner_type == "vendor" else ""
+    partner_options_html = partner_options(conn, partner_type, partner_id)
 
     details_title = "Open Documents"
     doc_label = "Document No"
@@ -337,7 +363,7 @@ def aging_page(
 
                 <div class="col">
                     <label>Partner</label>
-                    <select name="partner_id" id="partner"></select>
+                    <select name="partner_id" id="partner">{partner_options_html}</select>
                 </div>
 
                 <div class="col">
@@ -347,7 +373,7 @@ def aging_page(
 
             </div>
 
-            <button class="btn green" style="margin-top:10px;">Show</button>
+            <button class="btn green" type="submit" style="margin-top:10px;">Show</button>
             <a class="btn gray" style="margin-top:10px;" href="/ui/accounting/aging">Clear</a>
             <a class="btn gray" style="margin-top:10px;" href="/ui/accounting/export-center">Export</a>
         </form>
@@ -432,7 +458,9 @@ def aging_page(
             loadPartners();
         }});
 
-        loadPartners("{partner_id}");
+        if (!document.getElementById("partner").options.length || document.getElementById("partner").value !== "{partner_id}") {{
+            loadPartners("{partner_id}");
+        }}
     }});
     </script>
     """
@@ -441,4 +469,4 @@ def aging_page(
     if int(embed or 0) == 1:
         return HTMLResponse(html)
 
-    return HTMLResponse(render_page("Aging Report", html, current_path=str(request.url.path)))
+    return HTMLResponse(render_page("Aging Report", html, lang, current_path=str(request.url.path)))
