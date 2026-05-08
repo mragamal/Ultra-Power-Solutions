@@ -101,6 +101,11 @@ def get_period_bounds(year: int, month: int):
     return date(year, month, 1).isoformat(), date(year, month + 1, 1).isoformat()
 
 
+def get_year_bounds(year: int):
+    from datetime import date
+    return date(year, 1, 1).isoformat(), date(year + 1, 1, 1).isoformat()
+
+
 @router.get("/ui/accounting/monthly-dues", response_class=HTMLResponse)
 def monthly_dues_page(
     request: Request,
@@ -124,10 +129,18 @@ def monthly_dues_page(
 
     total_due = 0.0
 
-    start_date, next_month_date = None, None
-    if month and year:
+    start_date, period_end_date = None, None
+    if month:
         try:
-            start_date, next_month_date = get_period_bounds(int(year), int(month))
+            from datetime import datetime
+            report_year = int(year) if year else datetime.today().year
+            year = str(report_year)
+            start_date, period_end_date = get_period_bounds(report_year, int(month))
+        except Exception:
+            pass
+    elif year:
+        try:
+            start_date, period_end_date = get_year_bounds(int(year))
         except Exception:
             pass
 
@@ -154,9 +167,9 @@ def monthly_dues_page(
                     sql += " AND i.customer_id = ?"
                     params.append(partner_id)
 
-                if start_date and next_month_date:
+                if start_date and period_end_date:
                     sql += " AND i.due_date >= ? AND i.due_date < ?"
-                    params.extend([start_date, next_month_date])
+                    params.extend([start_date, period_end_date])
 
                 sql += " ORDER BY p.name, i.due_date, i.id"
 
@@ -226,9 +239,9 @@ def monthly_dues_page(
                     sql += " AND b.vendor_id = ?"
                     params.append(partner_id)
 
-                if start_date and next_month_date:
+                if start_date and period_end_date:
                     sql += " AND b.due_date >= ? AND b.due_date < ?"
-                    params.extend([start_date, next_month_date])
+                    params.extend([start_date, period_end_date])
 
                 sql += " ORDER BY p.name, b.due_date, b.id"
 
