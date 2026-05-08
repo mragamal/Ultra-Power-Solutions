@@ -1,4 +1,5 @@
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import re
 
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -111,6 +112,28 @@ def insert_expense_attachments(conn, expense_id, attachments):
             """,
             (expense_id, safe(item.get("file_url")), safe(item.get("file_name"))),
         )
+
+
+def expense_form_line_indexes(form):
+    indexes = set()
+    for key in form.keys():
+        match = re.match(r"^(?:acc|cc|amt|desc)_(\d+)$", safe(key))
+        if match:
+            indexes.add(int(match.group(1)))
+    return sorted(indexes)
+
+
+def expense_lines_from_form(form):
+    lines = []
+    for i in expense_form_line_indexes(form):
+        lines.append({
+            "idx": i,
+            "acc": form.get(f"acc_{i}") or "",
+            "cc": form.get(f"cc_{i}") or "",
+            "amt": form.get(f"amt_{i}") or "",
+            "desc": form.get(f"desc_{i}") or "",
+        })
+    return lines
 
 
 def ensure_column(conn, table_name, column_name, alter_sql):
@@ -879,19 +902,7 @@ async def save_expense(request: Request):
         "employee_id": employee_id_raw,
     }
 
-    initial_lines = []
-    i = 0
-    while True:
-        acc = form.get(f"acc_{i}")
-        if acc is None:
-            break
-        initial_lines.append({
-            "acc": acc,
-            "cc": form.get(f"cc_{i}") or "",
-            "amt": form.get(f"amt_{i}") or "",
-            "desc": form.get(f"desc_{i}") or "",
-        })
-        i += 1
+    initial_lines = expense_lines_from_form(form)
 
     new_attachments = await attachments_from_form(form)
     if not new_attachments:
@@ -925,22 +936,17 @@ async def save_expense(request: Request):
         total = Decimal("0.00")
         line_no = 1
 
-        i = 0
-        while True:
-            acc = form.get(f"acc_{i}")
-            if acc is None:
-                break
-
-            acc = safe(acc)
-            cc_raw = safe(form.get(f"cc_{i}"))
-            desc = safe(form.get(f"desc_{i}"))
+        for line in expense_lines_from_form(form):
+            acc = safe(line["acc"])
+            cc_raw = safe(line["cc"])
+            desc = safe(line["desc"])
 
             try:
                 cc_id = int(cc_raw) if cc_raw else None
             except Exception:
                 cc_id = None
 
-            amt = q2(form.get(f"amt_{i}") or "0")
+            amt = q2(line["amt"] or "0")
 
             if acc and amt > Decimal("0.00"):
                 if not cc_id:
@@ -961,8 +967,6 @@ async def save_expense(request: Request):
                 ))
                 total += amt
                 line_no += 1
-
-            i += 1
 
         if total <= Decimal("0.00"):
             raise Exception("Please enter at least one valid expense line.")
@@ -1198,19 +1202,7 @@ async def update_expense(request: Request, expense_id: int):
         "attachments": existing_attachments,
     }
 
-    initial_lines = []
-    i = 0
-    while True:
-        acc = form.get(f"acc_{i}")
-        if acc is None:
-            break
-        initial_lines.append({
-            "acc": acc,
-            "cc": form.get(f"cc_{i}") or "",
-            "amt": form.get(f"amt_{i}") or "",
-            "desc": form.get(f"desc_{i}") or "",
-        })
-        i += 1
+    initial_lines = expense_lines_from_form(form)
 
     new_attachments = await attachments_from_form(form)
     if not existing_attachments and not new_attachments:
@@ -1242,16 +1234,11 @@ async def update_expense(request: Request, expense_id: int):
         total = Decimal("0.00")
         line_no = 1
 
-        i = 0
-        while True:
-            acc = form.get(f"acc_{i}")
-            if acc is None:
-                break
-
-            acc = safe(acc)
-            cc_raw = safe(form.get(f"cc_{i}"))
-            desc = safe(form.get(f"desc_{i}"))
-            amt = q2(form.get(f"amt_{i}") or "0")
+        for line in expense_lines_from_form(form):
+            acc = safe(line["acc"])
+            cc_raw = safe(line["cc"])
+            desc = safe(line["desc"])
+            amt = q2(line["amt"] or "0")
 
             try:
                 cc_id = int(cc_raw) if cc_raw else None
@@ -1277,8 +1264,6 @@ async def update_expense(request: Request, expense_id: int):
                 ))
                 total += amt
                 line_no += 1
-
-            i += 1
 
         if total <= Decimal("0.00"):
             raise Exception("Please enter at least one valid expense line.")
