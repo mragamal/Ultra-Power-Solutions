@@ -176,6 +176,8 @@ def ensure_tables():
     ensure_column(conn, "fixed_assets", "offset_account_code", "ALTER TABLE fixed_assets ADD COLUMN offset_account_code TEXT")
     ensure_column(conn, "fixed_assets", "acquisition_journal_id", "ALTER TABLE fixed_assets ADD COLUMN acquisition_journal_id INTEGER")
     ensure_column(conn, "fixed_assets", "disposal_journal_id", "ALTER TABLE fixed_assets ADD COLUMN disposal_journal_id INTEGER")
+    ensure_column(conn, "fixed_assets", "source_vendor_bill_id", "ALTER TABLE fixed_assets ADD COLUMN source_vendor_bill_id INTEGER")
+    ensure_column(conn, "fixed_assets", "source_vendor_bill_line_id", "ALTER TABLE fixed_assets ADD COLUMN source_vendor_bill_line_id INTEGER")
     ensure_column(conn, "fixed_assets", "notes", "ALTER TABLE fixed_assets ADD COLUMN notes TEXT")
     ensure_column(conn, "fixed_assets", "created_at", "ALTER TABLE fixed_assets ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
 
@@ -1015,7 +1017,8 @@ def open_asset(request: Request, asset_id: int):
     if not disposal_rows:
         disposal_rows = "<tr><td colspan='5' style='text-align:center;'>No disposals found.</td></tr>"
 
-    can_post_acq = safe(asset["status"]).lower() == "draft" and asset["acquisition_journal_id"]
+    from_vendor_bill = safe_int(asset["source_vendor_bill_id"]) > 0
+    can_post_acq = safe(asset["status"]).lower() == "draft" and asset["acquisition_journal_id"] and not from_vendor_bill
     can_run_dep = safe(asset["status"]).lower() == "running"
     can_dispose = safe(asset["status"]).lower() == "running"
 
@@ -1036,6 +1039,7 @@ def open_asset(request: Request, asset_id: int):
         <p><b>Asset Account:</b> {safe(asset['acquisition_account_code'])}</p>
         <p><b>Offset Account:</b> {safe(asset['offset_account_code'])}</p>
         <p><b>Acquisition Journal ID:</b> {safe(asset['acquisition_journal_id'])}</p>
+        {"<p><b>Source Vendor Bill:</b> <a href='/ui/accounting/vendor-bills/%s/view'>Open Bill</a></p>" % safe(asset["source_vendor_bill_id"]) if from_vendor_bill else ""}
         <p><b>Disposal Journal ID:</b> {safe(asset['disposal_journal_id'])}</p>
         <p><b>Notes:</b> {safe(asset['notes'])}</p>
 

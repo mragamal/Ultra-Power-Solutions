@@ -223,6 +223,26 @@ def ensure_tables():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fixed_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT,
+            name TEXT,
+            category_id INTEGER,
+            purchase_date TEXT,
+            in_service_date TEXT,
+            cost REAL DEFAULT 0,
+            salvage_value REAL DEFAULT 0,
+            status TEXT DEFAULT 'draft',
+            acquisition_account_code TEXT,
+            offset_account_code TEXT,
+            acquisition_journal_id INTEGER,
+            disposal_journal_id INTEGER,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     ensure_column(conn, "vendor_bills", "bill_no", "ALTER TABLE vendor_bills ADD COLUMN bill_no TEXT")
     ensure_column(conn, "vendor_bills", "bill_date", "ALTER TABLE vendor_bills ADD COLUMN bill_date TEXT")
     ensure_column(conn, "vendor_bills", "due_date", "ALTER TABLE vendor_bills ADD COLUMN due_date TEXT")
@@ -254,6 +274,11 @@ def ensure_tables():
     ensure_column(conn, "vendor_bill_lines", "qty", "ALTER TABLE vendor_bill_lines ADD COLUMN qty REAL DEFAULT 0")
     ensure_column(conn, "vendor_bill_lines", "unit_price", "ALTER TABLE vendor_bill_lines ADD COLUMN unit_price REAL DEFAULT 0")
     ensure_column(conn, "vendor_bill_lines", "line_amount", "ALTER TABLE vendor_bill_lines ADD COLUMN line_amount REAL DEFAULT 0")
+    ensure_column(conn, "vendor_bill_lines", "asset_category_id", "ALTER TABLE vendor_bill_lines ADD COLUMN asset_category_id INTEGER")
+    ensure_column(conn, "vendor_bill_lines", "fixed_asset_id", "ALTER TABLE vendor_bill_lines ADD COLUMN fixed_asset_id INTEGER")
+
+    ensure_column(conn, "fixed_assets", "source_vendor_bill_id", "ALTER TABLE fixed_assets ADD COLUMN source_vendor_bill_id INTEGER")
+    ensure_column(conn, "fixed_assets", "source_vendor_bill_line_id", "ALTER TABLE fixed_assets ADD COLUMN source_vendor_bill_line_id INTEGER")
 
     conn.commit()
     conn.close()
@@ -330,6 +355,161 @@ def account_options(selected_code=""):
         sel = "selected" if safe(selected_code) == safe(row["code"]) else ""
         html += f"<option value='{safe(row['code'])}' {sel}>{safe(row['code'])} - {safe(row['name'])}</option>"
     return html
+
+
+def asset_category_options(selected_id=""):
+    rows = []
+    conn = get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT id, code, name
+            FROM asset_categories
+            WHERE COALESCE(is_active, 1) = 1
+            ORDER BY code, name, id
+        """).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+
+    html = '<option value="">No Asset</option>'
+    for row in rows:
+        row_id = safe(row["id"])
+        label = f"{safe(row['code'])} - {safe(row['name'])}".strip(" -")
+        selected = "selected" if row_id == safe(selected_id) else ""
+        html += f'<option value="{row_id}" {selected}>{label}</option>'
+    return html
+
+
+def next_asset_code_for_conn(conn):
+    row = conn.execute("""
+        SELECT code
+        FROM fixed_assets
+        WHERE COALESCE(code, '') <> ''
+        ORDER BY id DESC
+        LIMIT 1
+    """).fetchone()
+    if not row or not safe(row["code"]):
+        return "FA-00001"
+    last = safe(row["code"])
+    prefix = "FA"
+    number = 0
+    if "-" in last:
+        prefix, raw = last.rsplit("-", 1)
+        try:
+            number = int(raw)
+        except Exception:
+            number = 0
+    return f"{prefix}-{number + 1:05d}"
+
+
+def sync_vendor_bill_fixed_assets(conn, bill_id: int, final_posted: bool = False):
+    bill = conn.execute("SELECT * FROM vendor_bills WHERE id = ? LIMIT 1", (bill_id,)).fetchone()
+    if not bill:
+        return
+
+    lines = conn.execute("""
+        SELECT *
+        FROM vendor_bill_lines
+        WHERE bill_id = ?
+        ORDER BY line_no, id
+    """, (bill_id,)).fetchall()
+
+    seen_asset_ids = []
+    for line in lines:
+        category_id = safe_int(line["asset_category_id"], 0)
+        line_amount = to_decimal(line["line_amount"])
+        if category_id <= 0 or line_amount <= Decimal("0"):
+            continue
+
+        category = conn.execute("SELECT * FROM asset_categories WHERE id = ? LIMIT 1", (category_id,)).fetchone()
+        if not category:
+            continue
+
+        asset_id = safe_int(line["fixed_asset_id"], 0)
+        asset = None
+        if asset_id > 0:
+            asset = conn.execute("SELECT * FROM fixed_assets WHERE id = ? LIMIT 1", (asset_id,)).fetchone()
+
+        asset_name = safe(line["item_description"]) or f"{safe(bill['bill_no'])} line {safe(line['line_no'])}"
+        status = "running" if final_posted else "draft"
+        acquisition_account = safe(line["account_code"]) or safe(category["asset_account_code"])
+        notes = f"Created from vendor bill {safe(bill['bill_no'])}"
+
+        if asset:
+            conn.execute("""
+                UPDATE fixed_assets
+                SET name = ?,
+                    category_id = ?,
+                    purchase_date = ?,
+                    in_service_date = COALESCE(NULLIF(in_service_date, ''), ?),
+                    cost = ?,
+                    status = ?,
+                    acquisition_account_code = ?,
+                    offset_account_code = ?,
+                    acquisition_journal_id = ?,
+                    source_vendor_bill_id = ?,
+                    source_vendor_bill_line_id = ?,
+                    notes = ?
+                WHERE id = ?
+            """, (
+                asset_name,
+                category_id,
+                safe(bill["bill_date"]),
+                safe(bill["bill_date"]),
+                float(line_amount),
+                status,
+                acquisition_account,
+                safe(get_setting_value("vendor_control_account", "211100")),
+                bill["journal_id"],
+                bill_id,
+                line["id"],
+                notes,
+                asset_id,
+            ))
+        else:
+            cur = conn.execute("""
+                INSERT INTO fixed_assets (
+                    code, name, category_id, purchase_date, in_service_date,
+                    cost, salvage_value, status, acquisition_account_code,
+                    offset_account_code, acquisition_journal_id,
+                    source_vendor_bill_id, source_vendor_bill_line_id, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                next_asset_code_for_conn(conn),
+                asset_name,
+                category_id,
+                safe(bill["bill_date"]),
+                safe(bill["bill_date"]),
+                float(line_amount),
+                status,
+                acquisition_account,
+                safe(get_setting_value("vendor_control_account", "211100")),
+                bill["journal_id"],
+                bill_id,
+                line["id"],
+                notes,
+            ))
+            asset_id = cur.lastrowid
+            conn.execute("UPDATE vendor_bill_lines SET fixed_asset_id = ? WHERE id = ?", (asset_id, line["id"]))
+
+        seen_asset_ids.append(asset_id)
+
+    if seen_asset_ids:
+        placeholders = ",".join("?" for _ in seen_asset_ids)
+        conn.execute(f"""
+            DELETE FROM fixed_assets
+            WHERE source_vendor_bill_id = ?
+              AND id NOT IN ({placeholders})
+              AND LOWER(COALESCE(status, 'draft')) = 'draft'
+        """, [bill_id, *seen_asset_ids])
+    else:
+        conn.execute("""
+            DELETE FROM fixed_assets
+            WHERE source_vendor_bill_id = ?
+              AND LOWER(COALESCE(status, 'draft')) = 'draft'
+        """, (bill_id,))
 
 
 def get_vendor(conn, vendor_id: int):
@@ -554,9 +734,10 @@ def normalize_lines_from_form(form):
     qtys = form.getlist("line_qty")
     prices = form.getlist("line_unit_price")
     po_line_ids = form.getlist("line_po_line_id")
+    asset_category_ids = form.getlist("line_asset_category_id")
 
     lines = []
-    max_len = max(len(descriptions), len(account_codes), len(qtys), len(prices), len(po_line_ids), 0)
+    max_len = max(len(descriptions), len(account_codes), len(qtys), len(prices), len(po_line_ids), len(asset_category_ids), 0)
 
     for i in range(max_len):
         desc = safe(descriptions[i]) if i < len(descriptions) else ""
@@ -564,6 +745,7 @@ def normalize_lines_from_form(form):
         qty = to_decimal(qtys[i] if i < len(qtys) else "0")
         unit_price = to_decimal(prices[i] if i < len(prices) else "0")
         po_line_id = safe_int(po_line_ids[i] if i < len(po_line_ids) else 0, 0)
+        asset_category_id = safe_int(asset_category_ids[i] if i < len(asset_category_ids) else 0, 0)
 
         if desc == "" and account_code == "" and qty == Decimal("0") and unit_price == Decimal("0"):
             continue
@@ -578,6 +760,7 @@ def normalize_lines_from_form(form):
             "unit_price": unit_price,
             "line_amount": line_amount,
             "po_line_id": po_line_id if po_line_id > 0 else None,
+            "asset_category_id": asset_category_id if asset_category_id > 0 else None,
         })
 
     return lines
@@ -742,6 +925,9 @@ def render_lines_table(lines=None, readonly=False):
 
     body = ""
     for idx, line in enumerate(lines, start=1):
+        linked_asset = ""
+        if safe(line.get("fixed_asset_id", "")):
+            linked_asset = f"<a class='btn gray' href='/ui/accounting/fixed-assets/{safe(line.get('fixed_asset_id'))}'>Asset</a>"
         body += f"""
         <tr>
             <td>{idx}</td>
@@ -754,6 +940,13 @@ def render_lines_table(lines=None, readonly=False):
                     {account_options(safe(line.get('account_code', '')))}
                 </select>
                 {"<input type='hidden' name='line_account_code' value='%s'>" % safe(line.get('account_code', '')) if readonly else ""}
+            </td>
+            <td>
+                <select name="line_asset_category_id" class="line-asset-category" {select_disabled}>
+                    {asset_category_options(safe(line.get('asset_category_id', '')))}
+                </select>
+                {"<input type='hidden' name='line_asset_category_id' value='%s'>" % safe(line.get('asset_category_id', '')) if readonly else ""}
+                {linked_asset}
             </td>
             <td>
                 <input type="text" inputmode="decimal" name="line_qty" value="{dec_str(line.get('qty', '1'), 7)}" class="line-qty" {read_attr}>
@@ -815,6 +1008,7 @@ def vendor_bill_form(values=None, row_id=None, lines=None, readonly=False):
         """
 
     account_options_html = account_options().replace("\\", "\\\\").replace("`", "\\`")
+    asset_category_options_html = asset_category_options().replace("\\", "\\\\").replace("`", "\\`")
 
     return f"""
     {upload_card}
@@ -897,6 +1091,7 @@ def vendor_bill_form(values=None, row_id=None, lines=None, readonly=False):
                             <th style="width:60px;">#</th>
                             <th>Description</th>
                             <th>Account</th>
+                            <th style="width:220px;">Fixed Asset</th>
                             <th style="width:140px;">Qty</th>
                             <th style="width:180px;">Unit Price</th>
                             <th style="width:180px;">Line Amount</th>
@@ -946,6 +1141,7 @@ def vendor_bill_form(values=None, row_id=None, lines=None, readonly=False):
     (function() {{
         const isReadonly = {"true" if readonly else "false"};
         const defaultAccountOptions = `{account_options_html}`;
+        const defaultAssetCategoryOptions = `{asset_category_options_html}`;
 
         function pad(n) {{
             return String(n).padStart(2, "0");
@@ -1111,6 +1307,7 @@ def vendor_bill_form(values=None, row_id=None, lines=None, readonly=False):
                 "<td></td>" +
                 "<td><input type='text' name='line_description' placeholder='Description'><input type='hidden' name='line_po_line_id' value=''></td>" +
                 "<td><select name='line_account_code' class='line-account'>" + defaultAccountOptions + "</select></td>" +
+                "<td><select name='line_asset_category_id' class='line-asset-category'>" + defaultAssetCategoryOptions + "</select></td>" +
                 "<td><input type='text' inputmode='decimal' name='line_qty' value='1.0000000' class='line-qty'></td>" +
                 "<td><input type='text' inputmode='decimal' name='line_unit_price' value='0.0000000' class='line-price'></td>" +
                 "<td><input type='text' value='0.0000000' class='line-amount' readonly></td>" +
@@ -1765,9 +1962,10 @@ async def create_vendor_bill(request: Request):
         for line in lines:
             conn.execute("""
                 INSERT INTO vendor_bill_lines (
-                    bill_id, po_id, po_line_id, line_no, item_description, account_code, qty, unit_price, line_amount
+                    bill_id, po_id, po_line_id, line_no, item_description, account_code,
+                    asset_category_id, qty, unit_price, line_amount
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 bill_id,
                 source_po_id if source_po_id > 0 else None,
@@ -1775,6 +1973,7 @@ async def create_vendor_bill(request: Request):
                 line["line_no"],
                 line["item_description"],
                 line["account_code"],
+                line.get("asset_category_id"),
                 float(line["qty"]),
                 float(line["unit_price"]),
                 float(line["line_amount"]),
@@ -1787,6 +1986,7 @@ async def create_vendor_bill(request: Request):
             """, (bill_id, item["file_url"], item["file_name"]))
 
         create_vendor_bill_draft_journal(conn, bill_id)
+        sync_vendor_bill_fixed_assets(conn, bill_id)
         safe_log_action(
             "vendor_bill",
             bill_id,
@@ -1948,13 +2148,19 @@ async def update_vendor_bill(request: Request, row_id: int):
         ))
 
         conn.execute("DELETE FROM vendor_bill_lines WHERE bill_id = ?", (row_id,))
+        conn.execute("""
+            DELETE FROM fixed_assets
+            WHERE source_vendor_bill_id = ?
+              AND LOWER(COALESCE(status, 'draft')) = 'draft'
+        """, (row_id,))
 
         for line in lines:
             conn.execute("""
                 INSERT INTO vendor_bill_lines (
-                    bill_id, po_id, po_line_id, line_no, item_description, account_code, qty, unit_price, line_amount
+                    bill_id, po_id, po_line_id, line_no, item_description, account_code,
+                    asset_category_id, qty, unit_price, line_amount
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 row_id,
                 source_po_id if source_po_id > 0 else None,
@@ -1962,6 +2168,7 @@ async def update_vendor_bill(request: Request, row_id: int):
                 line["line_no"],
                 line["item_description"],
                 line["account_code"],
+                line.get("asset_category_id"),
                 float(line["qty"]),
                 float(line["unit_price"]),
                 float(line["line_amount"]),
@@ -1978,6 +2185,7 @@ async def update_vendor_bill(request: Request, row_id: int):
             delete_draft_journal_entry(conn, old_journal_id)
 
         create_vendor_bill_draft_journal(conn, row_id)
+        sync_vendor_bill_fixed_assets(conn, row_id)
         if safe(existing["status"]).lower() == "posted":
             refreshed = conn.execute("SELECT journal_id FROM vendor_bills WHERE id = ?", (row_id,)).fetchone()
             if refreshed and refreshed["journal_id"]:

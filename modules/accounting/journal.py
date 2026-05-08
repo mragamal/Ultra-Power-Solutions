@@ -1033,23 +1033,53 @@ def sync_vendor_bill_from_journal(conn, journal_id: int, bill_id: int):
     vat_rate = Decimal("0.00") if subtotal <= Decimal("0.00") else ((vat_amount / subtotal) * Decimal("100")).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
     wht_rate = Decimal("0.00") if subtotal <= Decimal("0.00") else ((wht_amount / subtotal) * Decimal("100")).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
 
+    ensure_column(conn, "vendor_bill_lines", "asset_category_id", "ALTER TABLE vendor_bill_lines ADD COLUMN asset_category_id INTEGER")
+    ensure_column(conn, "vendor_bill_lines", "fixed_asset_id", "ALTER TABLE vendor_bill_lines ADD COLUMN fixed_asset_id INTEGER")
+
+    old_line_assets = {}
+    if table_exists(conn, "vendor_bill_lines"):
+        for old in conn.execute("""
+            SELECT line_no, asset_category_id, fixed_asset_id
+            FROM vendor_bill_lines
+            WHERE bill_id = ?
+        """, (bill_id,)).fetchall():
+            old_line_assets[int(old["line_no"] or 0)] = {
+                "asset_category_id": old["asset_category_id"],
+                "fixed_asset_id": old["fixed_asset_id"],
+            }
+
+    for line in bill_lines:
+        meta = old_line_assets.get(int(line["line_no"] or 0), {})
+        line["asset_category_id"] = meta.get("asset_category_id")
+        line["fixed_asset_id"] = meta.get("fixed_asset_id")
+
     conn.execute("DELETE FROM vendor_bill_lines WHERE bill_id = ?", (bill_id,))
 
     for line in bill_lines:
-        conn.execute("""
+        cur = conn.execute("""
             INSERT INTO vendor_bill_lines (
-                bill_id, line_no, item_description, account_code, qty, unit_price, line_amount
+                bill_id, line_no, item_description, account_code,
+                asset_category_id, fixed_asset_id, qty, unit_price, line_amount
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             bill_id,
             line["line_no"],
             line["item_description"],
             line["account_code"],
+            line.get("asset_category_id"),
+            line.get("fixed_asset_id"),
             float(line["qty"]),
             float(line["unit_price"]),
             float(line["line_amount"]),
         ))
+        if safe(line.get("fixed_asset_id")) and table_exists(conn, "fixed_assets"):
+            conn.execute("""
+                UPDATE fixed_assets
+                SET source_vendor_bill_line_id = ?,
+                    acquisition_journal_id = ?
+                WHERE id = ?
+            """, (cur.lastrowid, journal_id, line.get("fixed_asset_id")))
 
     new_due_date = calc_due_date(entry["entry_date"], bill["payment_term_days"] or 0)
     conn.execute("""
@@ -1083,6 +1113,117 @@ def sync_vendor_bill_from_journal(conn, journal_id: int, bill_id: int):
     ))
 
     refresh_vendor_bill_payment_status(conn, bill_id)
+    sync_vendor_bill_assets_after_final(conn, bill_id, journal_id)
+
+
+def next_asset_code_for_conn(conn):
+    row = conn.execute("""
+        SELECT code
+        FROM fixed_assets
+        WHERE COALESCE(code, '') <> ''
+        ORDER BY id DESC
+        LIMIT 1
+    """).fetchone()
+    if not row or not safe(row["code"]):
+        return "FA-00001"
+    last = safe(row["code"])
+    prefix = "FA"
+    number = 0
+    if "-" in last:
+        prefix, raw = last.rsplit("-", 1)
+        try:
+            number = int(raw)
+        except Exception:
+            number = 0
+    return f"{prefix}-{number + 1:05d}"
+
+
+def sync_vendor_bill_assets_after_final(conn, bill_id: int, journal_id: int):
+    if not table_exists(conn, "fixed_assets") or not table_exists(conn, "asset_categories"):
+        return
+
+    ensure_column(conn, "fixed_assets", "source_vendor_bill_id", "ALTER TABLE fixed_assets ADD COLUMN source_vendor_bill_id INTEGER")
+    ensure_column(conn, "fixed_assets", "source_vendor_bill_line_id", "ALTER TABLE fixed_assets ADD COLUMN source_vendor_bill_line_id INTEGER")
+
+    bill = conn.execute("SELECT * FROM vendor_bills WHERE id = ? LIMIT 1", (bill_id,)).fetchone()
+    if not bill:
+        return
+
+    lines = conn.execute("""
+        SELECT *
+        FROM vendor_bill_lines
+        WHERE bill_id = ?
+          AND COALESCE(asset_category_id, 0) > 0
+        ORDER BY line_no, id
+    """, (bill_id,)).fetchall()
+
+    for line in lines:
+        amount = q2(line["line_amount"])
+        if amount <= Decimal("0.00"):
+            continue
+        category = conn.execute("SELECT * FROM asset_categories WHERE id = ? LIMIT 1", (line["asset_category_id"],)).fetchone()
+        if not category:
+            continue
+        asset_id = int(line["fixed_asset_id"] or 0) if safe(line["fixed_asset_id"]) else 0
+        asset_name = safe(line["item_description"]) or f"{safe(bill['bill_no'])} line {safe(line['line_no'])}"
+        asset_account = safe(line["account_code"]) or safe(category["asset_account_code"])
+        offset_account = safe(get_setting_value("vendor_control_account", "211100", conn=conn))
+        notes = f"Created from vendor bill {safe(bill['bill_no'])}"
+
+        if asset_id > 0:
+            conn.execute("""
+                UPDATE fixed_assets
+                SET name = ?,
+                    category_id = ?,
+                    purchase_date = ?,
+                    in_service_date = COALESCE(NULLIF(in_service_date, ''), ?),
+                    cost = ?,
+                    status = 'running',
+                    acquisition_account_code = ?,
+                    offset_account_code = ?,
+                    acquisition_journal_id = ?,
+                    source_vendor_bill_id = ?,
+                    source_vendor_bill_line_id = ?,
+                    notes = ?
+                WHERE id = ?
+            """, (
+                asset_name,
+                line["asset_category_id"],
+                safe(bill["bill_date"]),
+                safe(bill["bill_date"]),
+                float(amount),
+                asset_account,
+                offset_account,
+                journal_id,
+                bill_id,
+                line["id"],
+                notes,
+                asset_id,
+            ))
+        else:
+            cur = conn.execute("""
+                INSERT INTO fixed_assets (
+                    code, name, category_id, purchase_date, in_service_date,
+                    cost, salvage_value, status, acquisition_account_code,
+                    offset_account_code, acquisition_journal_id,
+                    source_vendor_bill_id, source_vendor_bill_line_id, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 0, 'running', ?, ?, ?, ?, ?, ?)
+            """, (
+                next_asset_code_for_conn(conn),
+                asset_name,
+                line["asset_category_id"],
+                safe(bill["bill_date"]),
+                safe(bill["bill_date"]),
+                float(amount),
+                asset_account,
+                offset_account,
+                journal_id,
+                bill_id,
+                line["id"],
+                notes,
+            ))
+            conn.execute("UPDATE vendor_bill_lines SET fixed_asset_id = ? WHERE id = ?", (cur.lastrowid, line["id"]))
 
 
 def sync_source_document_from_journal(conn, journal_id: int):
