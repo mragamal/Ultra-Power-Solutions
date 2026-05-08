@@ -596,11 +596,7 @@ def available_vendor_cash_payments(conn, vendor_id: int):
 
 
 def default_purchase_account():
-    return (
-        safe(get_setting_value("purchase_account", ""))
-        or safe(get_setting_value("expense_account", ""))
-        or "510000"
-    )
+    return ""
 
 
 def purchase_po_row(conn, po_id: int):
@@ -706,7 +702,6 @@ def purchase_item_name(conn, item_id):
 
 def build_bill_lines_from_po(conn, po_id: int):
     lines = []
-    account_code = default_purchase_account()
     for line in po_billable_lines(conn, po_id):
         desc = safe(line["description"]) or purchase_item_name(conn, line["item_id"]) or f"PO Line {line['po_line_id']}"
         qty_dec = Decimal(str(line["pending_qty"])).quantize(Decimal("1.0000000"), rounding=ROUND_HALF_UP)
@@ -715,7 +710,7 @@ def build_bill_lines_from_po(conn, po_id: int):
             {
                 "line_no": int(line["line_no"] or 0),
                 "item_description": desc,
-                "account_code": account_code,
+                "account_code": default_purchase_account(),
                 "qty": qty_dec,
                 "unit_price": price_dec,
                 "line_amount": (qty_dec * price_dec),
@@ -1826,7 +1821,7 @@ async def vendor_bill_ai_upload(request: Request, file: UploadFile = File(...)):
         }
         lines = [{
             "item_description": "",
-            "account_code": default_purchase_account(),
+            "account_code": "",
             "qty": Decimal("1"),
             "unit_price": Decimal("0"),
             "line_amount": Decimal("0"),
@@ -1852,11 +1847,10 @@ async def vendor_bill_ai_upload(request: Request, file: UploadFile = File(...)):
     description = safe(extracted.get("description"))
     if source_no:
         description = f"{description} | Source invoice {source_no}" if description else f"Source invoice {source_no}"
-    default_account = default_purchase_account()
     lines = []
     for line in extracted.get("lines", []):
         line = dict(line)
-        line["account_code"] = default_account
+        line["account_code"] = ""
         line["po_line_id"] = None
         lines.append(line)
     totals = calculate_bill_totals(lines, extracted.get("vat_rate", 14), extracted.get("wht_rate", 0))
