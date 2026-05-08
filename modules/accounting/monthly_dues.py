@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from db import get_conn
+from i18n import get_lang
 from layout import render_page
 from modules.accounting.allocation_engine import get_document_open_amount
 
@@ -15,8 +16,13 @@ def money(x):
         return "0.00"
 
 
+def esc(value):
+    import html
+    return html.escape(str(value or ""))
+
+
 def month_options(selected=""):
-    html = '<option value="">Select Month</option>'
+    html = '<option value="">All Months</option>'
     months = [
         ("1", "January"),
         ("2", "February"),
@@ -40,7 +46,7 @@ def month_options(selected=""):
 def year_options(selected=""):
     from datetime import datetime
     current_year = datetime.today().year
-    html = '<option value="">Select Year</option>'
+    html = '<option value="">All Years</option>'
     for y in range(current_year - 3, current_year + 4):
         sel = "selected" if str(selected) == str(y) else ""
         html += f'<option value="{y}" {sel}>{y}</option>'
@@ -64,6 +70,20 @@ def get_partners(conn, partner_type: str):
             "text": label
         })
     return result
+
+
+def partner_options(conn, partner_type: str, selected_id: str = ""):
+    partner_type = (partner_type or "").strip().lower()
+    selected_id = str(selected_id or "").strip()
+
+    if partner_type not in ("customer", "vendor"):
+        return '<option value="">Select Partner</option>'
+
+    html = '<option value="">All Partners</option>'
+    for item in get_partners(conn, partner_type):
+        selected = "selected" if str(item["id"]) == selected_id else ""
+        html += f"<option value='{item['id']}' {selected}>{esc(item['text'])}</option>"
+    return html
 
 
 @router.get("/ui/accounting/monthly-dues/partners")
@@ -91,6 +111,7 @@ def monthly_dues_page(
     embed: int = 0,
 ):
     conn = get_conn()
+    lang = get_lang(request)
 
     partner_type = (partner_type or "").strip().lower()
     partner_id = (partner_id or "").strip()
@@ -99,26 +120,19 @@ def monthly_dues_page(
 
     summary_rows_html = ""
     detail_rows_html = ""
-    partner_options_html = '<option value="">Select Partner</option>'
-
-    if partner_type:
-        items = get_partners(conn, partner_type)
-        for item in items:
-            sel = "selected" if str(item["id"]) == str(partner_id) else ""
-            partner_options_html += f"<option value='{item['id']}' {sel}>{item['text']}</option>"
+    partner_options_html = partner_options(conn, partner_type, partner_id)
 
     total_due = 0.0
 
-    if partner_type and month and year:
+    start_date, next_month_date = None, None
+    if month and year:
         try:
-            month_no = int(month)
-            year_no = int(year)
-            start_date, next_month_date = get_period_bounds(year_no, month_no)
+            start_date, next_month_date = get_period_bounds(int(year), int(month))
         except Exception:
-            start_date, next_month_date = None, None
+            pass
 
-        if start_date and next_month_date:
-            if partner_type == "customer":
+    if partner_type:
+        if partner_type == "customer":
                 sql = """
                     SELECT
                         i.id,
@@ -133,14 +147,16 @@ def monthly_dues_page(
                     LEFT JOIN partners p ON p.id = i.customer_id
                     WHERE LOWER(COALESCE(i.status,'')) = 'posted'
                       AND COALESCE(i.reversed_journal_id, 0) = 0
-                      AND i.due_date >= ?
-                      AND i.due_date < ?
                 """
-                params = [start_date, next_month_date]
+                params = []
 
                 if partner_id:
                     sql += " AND i.customer_id = ?"
                     params.append(partner_id)
+
+                if start_date and next_month_date:
+                    sql += " AND i.due_date >= ? AND i.due_date < ?"
+                    params.extend([start_date, next_month_date])
 
                 sql += " ORDER BY p.name, i.due_date, i.id"
 
@@ -188,7 +204,7 @@ def monthly_dues_page(
                     </tr>
                     """
 
-            elif partner_type == "vendor":
+        elif partner_type == "vendor":
                 sql = """
                     SELECT
                         b.id,
@@ -203,14 +219,16 @@ def monthly_dues_page(
                     LEFT JOIN partners p ON p.id = b.vendor_id
                     WHERE LOWER(COALESCE(b.status,'')) = 'posted'
                       AND COALESCE(b.reversed_journal_id, 0) = 0
-                      AND b.due_date >= ?
-                      AND b.due_date < ?
                 """
-                params = [start_date, next_month_date]
+                params = []
 
                 if partner_id:
                     sql += " AND b.vendor_id = ?"
                     params.append(partner_id)
+
+                if start_date and next_month_date:
+                    sql += " AND b.due_date >= ? AND b.due_date < ?"
+                    params.extend([start_date, next_month_date])
 
                 sql += " ORDER BY p.name, b.due_date, b.id"
 
@@ -392,4 +410,4 @@ def monthly_dues_page(
     if int(embed or 0) == 1:
         return HTMLResponse(html)
 
-    return HTMLResponse(render_page("Monthly Dues", html, "en", request.url.path))
+    return HTMLResponse(render_page("Monthly Dues", html, lang, current_path=str(request.url.path)))
