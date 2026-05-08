@@ -74,6 +74,8 @@ def get_partners(conn, partner_type: str):
 
 def partner_options(conn, partner_type: str, selected_id: str = ""):
     partner_type = (partner_type or "").strip().lower()
+    if partner_type not in ("customer", "vendor"):
+        partner_type = "customer"
     selected_id = str(selected_id or "").strip()
 
     if partner_type not in ("customer", "vendor"):
@@ -119,6 +121,8 @@ def monthly_dues_page(
     lang = get_lang(request)
 
     partner_type = (partner_type or "").strip().lower()
+    if partner_type not in ("customer", "vendor"):
+        partner_type = "customer"
     partner_id = (partner_id or "").strip()
     month = (month or "").strip()
     year = (year or "").strip()
@@ -310,7 +314,7 @@ def monthly_dues_page(
     <div class="card">
         <h2>Monthly Dues</h2>
 
-        <form method="get">
+        <form method="get" id="monthlyDuesForm">
             <div class="row">
                 <div class="col">
                     <label>Type</label>
@@ -409,8 +413,25 @@ def monthly_dues_page(
         }});
     }}
 
+    const monthlyDuesForm = document.getElementById("monthlyDuesForm");
+    const partnerSelect = document.getElementById("partner");
+    const monthSelect = document.getElementById("month");
+    const yearSelect = document.getElementById("year");
+
     document.getElementById("ptype").addEventListener("change", function() {{
         loadPartners("");
+    }});
+
+    partnerSelect.addEventListener("change", function() {{
+        monthlyDuesForm.requestSubmit();
+    }});
+
+    monthSelect.addEventListener("change", function() {{
+        monthlyDuesForm.requestSubmit();
+    }});
+
+    yearSelect.addEventListener("change", function() {{
+        monthlyDuesForm.requestSubmit();
     }});
 
     window.onload = function() {{

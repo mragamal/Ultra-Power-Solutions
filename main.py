@@ -997,6 +997,8 @@ def hr_root(request: Request):
         (t(lang, "Employee Categories", "ظپط¦ط§طھ ط§ظ„ظ…ظˆط¸ظپظٹظ†"), "/ui/hr/categories", "/static/icons/employees.svg", t(lang, "Attendance groups, roles, shifts, and grace rules", "ظ…ط¬ظ…ظˆط¹ط§طھ ط§ظ„ط­ط¶ظˆط± ظˆط§ظ„ط£ط¯ظˆط§ط± ظˆط§ظ„ظˆط±ط¯ظٹط§طھ ظˆظ‚ظˆط§ط¹ط¯ ط§ظ„ط³ظ…ط§ط­")),
         (t(lang, "Attendance", "ط§ظ„ط­ط¶ظˆط±"), "/ui/hr/attendance", "/static/icons/reports.svg", t(lang, "Biometric attendance import and daily logs", "ط§ط³طھظٹط±ط§ط¯ ط§ظ„ط¨طµظ…ط© ظˆط³ط¬ظ„ط§طھ ط§ظ„ط­ط¶ظˆط± ط§ظ„ظٹظˆظ…ظٹط©")),
         (t(lang, "Payroll", "ط§ظ„ظ…ط±طھط¨ط§طھ"), "/ui/hr/payroll", "/static/icons/reports.svg", t(lang, "Monthly payroll generation, review, and posting", "ط¥ط¹ط¯ط§ط¯ ظ…ط³ظٹط± ط§ظ„ظ…ط±طھط¨ط§طھ ط§ظ„ط´ظ‡ط±ظٹ ظˆظ…ط±ط§ط¬ط¹طھظ‡ ظˆطھط±ط­ظٹظ„ظ‡")),
+        ("Employee Rewards", "/ui/hr/employee-rewards", "/static/icons/reports.svg", "Employee rewards with required attachments"),
+        ("Employee Penalties", "/ui/hr/employee-penalties", "/static/icons/reports.svg", "Employee penalties with required attachments"),
     ]
     content = card_section(t(lang, "HR", "ط§ظ„ظ…ظˆط§ط±ط¯ ط§ظ„ط¨ط´ط±ظٹط©"), hr_cards)
     return HTMLResponse(render_page(t(lang, "HR", "ط§ظ„ظ…ظˆط§ط±ط¯ ط§ظ„ط¨ط´ط±ظٹط©"), content, lang, current_path="/ui/hr"))

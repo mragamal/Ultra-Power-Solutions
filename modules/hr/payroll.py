@@ -35,6 +35,7 @@ from modules.accounting.cash_vouchers import (
     ensure_tables as ensure_cash_voucher_tables,
     next_voucher_no,
 )
+from modules.accounting.invoice_ai import attachment_gallery, attachments_from_form
 from modules.hr.attendance import ensure_attendance_tables
 from modules.hr.employees import ensure_employees_table, safe, to_float
 
@@ -210,6 +211,66 @@ def ensure_payroll_tables():
         ensure_column(conn, "employee_grant_lines", "grant_amount", "ALTER TABLE employee_grant_lines ADD COLUMN grant_amount REAL DEFAULT 0")
         ensure_column(conn, "employee_grant_lines", "notes", "ALTER TABLE employee_grant_lines ADD COLUMN notes TEXT")
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS employee_rewards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reward_no TEXT UNIQUE,
+                reward_date TEXT,
+                employee_id INTEGER NOT NULL,
+                amount REAL DEFAULT 0,
+                reason TEXT,
+                attachment_url TEXT,
+                attachment_name TEXT,
+                status TEXT DEFAULT 'draft',
+                payroll_run_id INTEGER,
+                payroll_line_id INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        ensure_column(conn, "employee_rewards", "reward_no", "ALTER TABLE employee_rewards ADD COLUMN reward_no TEXT")
+        ensure_column(conn, "employee_rewards", "reward_date", "ALTER TABLE employee_rewards ADD COLUMN reward_date TEXT")
+        ensure_column(conn, "employee_rewards", "employee_id", "ALTER TABLE employee_rewards ADD COLUMN employee_id INTEGER")
+        ensure_column(conn, "employee_rewards", "amount", "ALTER TABLE employee_rewards ADD COLUMN amount REAL DEFAULT 0")
+        ensure_column(conn, "employee_rewards", "reason", "ALTER TABLE employee_rewards ADD COLUMN reason TEXT")
+        ensure_column(conn, "employee_rewards", "attachment_url", "ALTER TABLE employee_rewards ADD COLUMN attachment_url TEXT")
+        ensure_column(conn, "employee_rewards", "attachment_name", "ALTER TABLE employee_rewards ADD COLUMN attachment_name TEXT")
+        ensure_column(conn, "employee_rewards", "status", "ALTER TABLE employee_rewards ADD COLUMN status TEXT DEFAULT 'draft'")
+        ensure_column(conn, "employee_rewards", "payroll_run_id", "ALTER TABLE employee_rewards ADD COLUMN payroll_run_id INTEGER")
+        ensure_column(conn, "employee_rewards", "payroll_line_id", "ALTER TABLE employee_rewards ADD COLUMN payroll_line_id INTEGER")
+        ensure_column(conn, "employee_rewards", "created_at", "ALTER TABLE employee_rewards ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS employee_penalties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                penalty_no TEXT UNIQUE,
+                penalty_date TEXT,
+                employee_id INTEGER NOT NULL,
+                amount REAL DEFAULT 0,
+                reason TEXT,
+                attachment_url TEXT,
+                attachment_name TEXT,
+                status TEXT DEFAULT 'draft',
+                payroll_run_id INTEGER,
+                payroll_line_id INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        ensure_column(conn, "employee_penalties", "penalty_no", "ALTER TABLE employee_penalties ADD COLUMN penalty_no TEXT")
+        ensure_column(conn, "employee_penalties", "penalty_date", "ALTER TABLE employee_penalties ADD COLUMN penalty_date TEXT")
+        ensure_column(conn, "employee_penalties", "employee_id", "ALTER TABLE employee_penalties ADD COLUMN employee_id INTEGER")
+        ensure_column(conn, "employee_penalties", "amount", "ALTER TABLE employee_penalties ADD COLUMN amount REAL DEFAULT 0")
+        ensure_column(conn, "employee_penalties", "reason", "ALTER TABLE employee_penalties ADD COLUMN reason TEXT")
+        ensure_column(conn, "employee_penalties", "attachment_url", "ALTER TABLE employee_penalties ADD COLUMN attachment_url TEXT")
+        ensure_column(conn, "employee_penalties", "attachment_name", "ALTER TABLE employee_penalties ADD COLUMN attachment_name TEXT")
+        ensure_column(conn, "employee_penalties", "status", "ALTER TABLE employee_penalties ADD COLUMN status TEXT DEFAULT 'draft'")
+        ensure_column(conn, "employee_penalties", "payroll_run_id", "ALTER TABLE employee_penalties ADD COLUMN payroll_run_id INTEGER")
+        ensure_column(conn, "employee_penalties", "payroll_line_id", "ALTER TABLE employee_penalties ADD COLUMN payroll_line_id INTEGER")
+        ensure_column(conn, "employee_penalties", "created_at", "ALTER TABLE employee_penalties ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
+
         ensure_column(conn, "payroll_lines", "employee_code", "ALTER TABLE payroll_lines ADD COLUMN employee_code TEXT")
         ensure_column(conn, "payroll_lines", "employee_name", "ALTER TABLE payroll_lines ADD COLUMN employee_name TEXT")
         ensure_column(conn, "payroll_lines", "department", "ALTER TABLE payroll_lines ADD COLUMN department TEXT")
@@ -284,6 +345,127 @@ def next_grant_no():
         return f"GRANT-{num + 1:04d}"
     finally:
         conn.close()
+
+
+def next_hr_adjustment_no(table_name, no_column, prefix):
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            f"""
+            SELECT {no_column} AS doc_no
+            FROM {table_name}
+            WHERE COALESCE({no_column}, '') <> ''
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        last = safe(row["doc_no"]) if row else ""
+        if not last:
+            return f"{prefix}-0001"
+        try:
+            num = int(last.split("-")[-1])
+        except Exception:
+            num = 0
+        return f"{prefix}-{num + 1:04d}"
+    finally:
+        conn.close()
+
+
+def next_reward_no():
+    return next_hr_adjustment_no("employee_rewards", "reward_no", "REW")
+
+
+def next_penalty_no():
+    return next_hr_adjustment_no("employee_penalties", "penalty_no", "PEN")
+
+
+def employee_select_options(conn, selected_id=""):
+    rows = conn.execute(
+        """
+        SELECT id, code, name
+        FROM employees
+        WHERE COALESCE(is_active, 1) = 1
+        ORDER BY code, name
+        """
+    ).fetchall()
+    html = "<option value=''>-- Select Employee --</option>"
+    for row in rows:
+        selected = "selected" if safe(selected_id) == safe(row["id"]) else ""
+        label = f"{safe(row['code'])} - {safe(row['name'])}"
+        html += f"<option value='{int(row['id'])}' {selected}>{escape(label)}</option>"
+    return html
+
+
+def payroll_period_condition(date_column):
+    return f"COALESCE({date_column}, '') >= ? AND COALESCE({date_column}, '') <= ?"
+
+
+def employee_payroll_adjustments(conn, employee_id, period_from, period_to):
+    rewards = conn.execute(
+        f"""
+        SELECT id, reward_no AS doc_no, amount, reason
+        FROM employee_rewards
+        WHERE employee_id = ?
+          AND LOWER(COALESCE(status, 'draft')) IN ('draft', 'open')
+          AND COALESCE(payroll_run_id, 0) = 0
+          AND {payroll_period_condition('reward_date')}
+        ORDER BY reward_date, id
+        """,
+        (employee_id, safe(period_from), safe(period_to)),
+    ).fetchall()
+    penalties = conn.execute(
+        f"""
+        SELECT id, penalty_no AS doc_no, amount, reason
+        FROM employee_penalties
+        WHERE employee_id = ?
+          AND LOWER(COALESCE(status, 'draft')) IN ('draft', 'open')
+          AND COALESCE(payroll_run_id, 0) = 0
+          AND {payroll_period_condition('penalty_date')}
+        ORDER BY penalty_date, id
+        """,
+        (employee_id, safe(period_from), safe(period_to)),
+    ).fetchall()
+    return rewards, penalties
+
+
+def mark_payroll_adjustments_applied(conn, rewards, penalties, run_id, line_id):
+    for row in rewards:
+        conn.execute(
+            """
+            UPDATE employee_rewards
+            SET status = 'applied', payroll_run_id = ?, payroll_line_id = ?
+            WHERE id = ?
+            """,
+            (run_id, line_id, row["id"]),
+        )
+    for row in penalties:
+        conn.execute(
+            """
+            UPDATE employee_penalties
+            SET status = 'applied', payroll_run_id = ?, payroll_line_id = ?
+            WHERE id = ?
+            """,
+            (run_id, line_id, row["id"]),
+        )
+
+
+def clear_payroll_hr_adjustments(conn, run_id):
+    conn.execute(
+        """
+        UPDATE employee_rewards
+        SET status = 'draft', payroll_run_id = NULL, payroll_line_id = NULL
+        WHERE payroll_run_id = ?
+        """,
+        (run_id,),
+    )
+    conn.execute(
+        """
+        UPDATE employee_penalties
+        SET status = 'draft', payroll_run_id = NULL, payroll_line_id = NULL
+        WHERE payroll_run_id = ?
+        """,
+        (run_id,),
+    )
 
 
 def grant_base_amount(emp, salary_base):
@@ -763,6 +945,8 @@ def payroll_list(request: Request):
             <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
                 <h2>Payroll</h2>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <a class="btn orange" href="/ui/hr/employee-penalties">Employee Penalties</a>
+                    <a class="btn blue" href="/ui/hr/employee-rewards">Employee Rewards</a>
                     <a class="btn blue" href="/ui/hr/employee-grants">Employee Grants</a>
                     <a class="btn green" href="/ui/hr/payroll/new">+ New Payroll Run</a>
                 </div>
@@ -935,8 +1119,17 @@ def payroll_create(
                 int(payroll_year or 0),
                 float(advance_deduction or 0),
             )
+            rewards, penalties = employee_payroll_adjustments(conn, emp["id"], period_from, period_to)
+            reward_amount = sum(float(row["amount"] or 0) for row in rewards)
+            penalty_amount = sum(float(row["amount"] or 0) for row in penalties)
+            notes = [remarks] if safe(remarks) else []
+            if reward_amount:
+                notes.append("Rewards: " + ", ".join(safe(row["doc_no"]) for row in rewards))
+            if penalty_amount:
+                notes.append("Penalties: " + ", ".join(safe(row["doc_no"]) for row in penalties))
+            remarks = " | ".join(notes)
 
-            conn.execute(
+            line_cur = conn.execute(
                 """
                 INSERT INTO payroll_lines (
                     payroll_run_id, employee_id, employee_code, employee_name, department, job_title,
@@ -964,8 +1157,8 @@ def payroll_create(
                     worked_hours,
                     overtime_hours,
                     overtime_amount,
-                    0,
-                    0,
+                    reward_amount,
+                    penalty_amount,
                     advance_deduction,
                     absence_deduction,
                     insurance_employee_amount,
@@ -975,6 +1168,7 @@ def payroll_create(
                     remarks,
                 ),
             )
+            mark_payroll_adjustments_applied(conn, rewards, penalties, run_id, line_cur.lastrowid)
 
         recalc_payroll_totals(conn, run_id)
         conn.commit()
@@ -1917,6 +2111,298 @@ def payroll_payslip(request: Request, run_id: int, line_id: int):
         return HTMLResponse(render_page("Payslip", html, "en", current_path=request.url.path))
     finally:
         conn.close()
+
+
+def hr_adjustment_list_page(request, kind):
+    ensure_payroll_tables()
+    is_reward = kind == "reward"
+    table = "employee_rewards" if is_reward else "employee_penalties"
+    no_col = "reward_no" if is_reward else "penalty_no"
+    date_col = "reward_date" if is_reward else "penalty_date"
+    base_path = "/ui/hr/employee-rewards" if is_reward else "/ui/hr/employee-penalties"
+    title = "Employee Rewards" if is_reward else "Employee Penalties"
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT a.*, e.code AS employee_code, e.name AS employee_name
+            FROM {table} a
+            LEFT JOIN employees e ON e.id = a.employee_id
+            ORDER BY a.id DESC
+            """
+        ).fetchall()
+        msg = safe(request.query_params.get("msg"))
+        msg_html = f'<div class="msg success">{escape(msg)}</div>' if msg else ""
+        body = ""
+        for row in rows:
+            status = safe(row["status"]) or "draft"
+            status_cls = "green" if status.lower() == "applied" else "orange"
+            actions = f'<a class="btn blue" href="{base_path}/{row["id"]}">Open</a>'
+            if status.lower() in ("draft", "open"):
+                actions += f"""
+                    <form method="post" action="{base_path}/{row['id']}/delete" style="display:inline;"
+                          onsubmit="return confirm('Delete this draft record?');">
+                        <button class="btn red" type="submit">Delete</button>
+                    </form>
+                """
+            body += f"""
+            <tr>
+                <td><a class="btn gray" href="{base_path}/{row['id']}">{escape(safe(row[no_col]))}</a></td>
+                <td>{escape(safe(row[date_col]))}</td>
+                <td>{escape(safe(row['employee_code']))} - {escape(safe(row['employee_name']))}</td>
+                <td class="number-cell">{money(row['amount'])}</td>
+                <td>{escape(safe(row['reason']))}</td>
+                <td><span class="status-chip {status_cls}">{escape(status)}</span></td>
+                <td>{actions}</td>
+            </tr>
+            """
+        if not body:
+            body = "<tr><td colspan='7' style='text-align:center;'>No records found.</td></tr>"
+        html = f"""
+        <div class="card">
+            {msg_html}
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+                <h2>{title}</h2>
+                <a class="btn green" href="{base_path}/new">+ New</a>
+            </div>
+        </div>
+        <div class="card">
+            <table>
+                <tr>
+                    <th>No</th><th>Date</th><th>Employee</th><th>Amount</th><th>Reason</th><th>Status</th><th>Action</th>
+                </tr>
+                {body}
+            </table>
+        </div>
+        """
+        return HTMLResponse(render_page(title, html, "en", current_path=request.url.path))
+    finally:
+        conn.close()
+
+
+def hr_adjustment_new_page(request, kind, error=""):
+    ensure_payroll_tables()
+    is_reward = kind == "reward"
+    base_path = "/ui/hr/employee-rewards" if is_reward else "/ui/hr/employee-penalties"
+    title = "New Employee Reward" if is_reward else "New Employee Penalty"
+    doc_no = next_reward_no() if is_reward else next_penalty_no()
+    conn = get_conn()
+    try:
+        error_html = f'<div class="msg error">{escape(error)}</div>' if error else ""
+        html = f"""
+        <div class="card">
+            {error_html}
+            <h2>{title}</h2>
+            <form method="post" action="{base_path}/new" enctype="multipart/form-data">
+                <div class="row">
+                    <div class="col">
+                        <label>No</label>
+                        <input name="doc_no" value="{doc_no}" readonly>
+                    </div>
+                    <div class="col">
+                        <label>Date</label>
+                        <input type="date" name="doc_date" value="{date.today().isoformat()}" required>
+                    </div>
+                    <div class="col">
+                        <label>Employee</label>
+                        <select name="employee_id" required>{employee_select_options(conn)}</select>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label>Amount</label>
+                        <input type="number" step="0.01" min="0.01" name="amount" required>
+                    </div>
+                    <div class="col">
+                        <label>Attachment</label>
+                        <input type="file" name="invoice_attachments" accept=".pdf,image/*" required>
+                    </div>
+                </div>
+                <label>Reason</label>
+                <input name="reason">
+                <div style="margin-top:16px;">
+                    <button class="btn green" type="submit">Save</button>
+                    <a class="btn gray" href="{base_path}">Back</a>
+                </div>
+            </form>
+        </div>
+        """
+        return HTMLResponse(render_page(title, html, "en", current_path=request.url.path))
+    finally:
+        conn.close()
+
+
+async def hr_adjustment_create(request, kind):
+    ensure_payroll_tables()
+    is_reward = kind == "reward"
+    table = "employee_rewards" if is_reward else "employee_penalties"
+    no_col = "reward_no" if is_reward else "penalty_no"
+    date_col = "reward_date" if is_reward else "penalty_date"
+    base_path = "/ui/hr/employee-rewards" if is_reward else "/ui/hr/employee-penalties"
+    form = await request.form()
+    attachments = await attachments_from_form(form)
+    if not attachments:
+        return hr_adjustment_new_page(request, kind, "Attachment is required.")
+    doc_no = safe(form.get("doc_no")) or (next_reward_no() if is_reward else next_penalty_no())
+    doc_date = safe(form.get("doc_date")) or date.today().isoformat()
+    employee_id = int(to_float(form.get("employee_id")))
+    amount = to_float(form.get("amount"))
+    reason = safe(form.get("reason"))
+    if not employee_id or amount <= 0:
+        return hr_adjustment_new_page(request, kind, "Employee and amount are required.")
+    first = attachments[0]
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            f"""
+            INSERT INTO {table} (
+                {no_col}, {date_col}, employee_id, amount, reason,
+                attachment_url, attachment_name, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'draft')
+            """,
+            (doc_no, doc_date, employee_id, amount, reason, first["file_url"], first["file_name"]),
+        )
+        conn.commit()
+        return RedirectResponse(f"{base_path}/{cur.lastrowid}?msg=" + quote("Saved."), status_code=302)
+    except Exception as e:
+        conn.rollback()
+        return HTMLResponse(f"Save error: {escape(str(e))}", status_code=400)
+    finally:
+        conn.close()
+
+
+def hr_adjustment_open_page(request, kind, record_id):
+    ensure_payroll_tables()
+    is_reward = kind == "reward"
+    table = "employee_rewards" if is_reward else "employee_penalties"
+    no_col = "reward_no" if is_reward else "penalty_no"
+    date_col = "reward_date" if is_reward else "penalty_date"
+    base_path = "/ui/hr/employee-rewards" if is_reward else "/ui/hr/employee-penalties"
+    title = "Employee Reward" if is_reward else "Employee Penalty"
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            f"""
+            SELECT a.*, e.code AS employee_code, e.name AS employee_name
+            FROM {table} a
+            LEFT JOIN employees e ON e.id = a.employee_id
+            WHERE a.id = ?
+            LIMIT 1
+            """,
+            (record_id,),
+        ).fetchone()
+        if not row:
+            return HTMLResponse("Record not found", status_code=404)
+        msg = safe(request.query_params.get("msg"))
+        msg_html = f'<div class="msg success">{escape(msg)}</div>' if msg else ""
+        actions = ""
+        if safe(row["status"]).lower() in ("draft", "open"):
+            actions = f"""
+                <form method="post" action="{base_path}/{record_id}/delete" style="display:inline;"
+                      onsubmit="return confirm('Delete this draft record?');">
+                    <button class="btn red" type="submit">Delete</button>
+                </form>
+            """
+        attachments_html = attachment_gallery([{"file_url": row["attachment_url"], "file_name": row["attachment_name"]}])
+        html = f"""
+        <div class="card">
+            {msg_html}
+            <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start;">
+                <div>
+                    <h2>{title} {escape(safe(row[no_col]))}</h2>
+                    <p><b>Date:</b> {escape(safe(row[date_col]))}</p>
+                    <p><b>Employee:</b> {escape(safe(row['employee_code']))} - {escape(safe(row['employee_name']))}</p>
+                    <p><b>Amount:</b> {money(row['amount'])}</p>
+                    <p><b>Reason:</b> {escape(safe(row['reason']))}</p>
+                    <p><b>Status:</b> <span class="status-chip orange">{escape(safe(row['status']))}</span></p>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    {actions}
+                    <a class="btn gray" href="{base_path}">Back</a>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>Attachment</h3>
+            {attachments_html}
+        </div>
+        """
+        return HTMLResponse(render_page(title, html, "en", current_path=request.url.path))
+    finally:
+        conn.close()
+
+
+def hr_adjustment_delete(kind, record_id):
+    ensure_payroll_tables()
+    is_reward = kind == "reward"
+    table = "employee_rewards" if is_reward else "employee_penalties"
+    base_path = "/ui/hr/employee-rewards" if is_reward else "/ui/hr/employee-penalties"
+    conn = get_conn()
+    try:
+        row = conn.execute(f"SELECT * FROM {table} WHERE id = ? LIMIT 1", (record_id,)).fetchone()
+        if not row:
+            return RedirectResponse(f"{base_path}?msg=" + quote("Record not found."), status_code=302)
+        if safe(row["status"]).lower() not in ("draft", "open"):
+            return RedirectResponse(f"{base_path}?msg=" + quote("Applied records cannot be deleted."), status_code=302)
+        conn.execute(f"DELETE FROM {table} WHERE id = ?", (record_id,))
+        conn.commit()
+        return RedirectResponse(f"{base_path}?msg=" + quote("Deleted."), status_code=302)
+    except Exception as e:
+        conn.rollback()
+        return HTMLResponse(f"Delete error: {escape(str(e))}", status_code=400)
+    finally:
+        conn.close()
+
+
+@router.get("/ui/hr/employee-rewards", response_class=HTMLResponse)
+def employee_rewards_list(request: Request):
+    return hr_adjustment_list_page(request, "reward")
+
+
+@router.get("/ui/hr/employee-rewards/new", response_class=HTMLResponse)
+def employee_reward_new(request: Request):
+    return hr_adjustment_new_page(request, "reward")
+
+
+@router.post("/ui/hr/employee-rewards/new")
+async def employee_reward_create(request: Request):
+    return await hr_adjustment_create(request, "reward")
+
+
+@router.get("/ui/hr/employee-rewards/{record_id}", response_class=HTMLResponse)
+def employee_reward_open(request: Request, record_id: int):
+    return hr_adjustment_open_page(request, "reward", record_id)
+
+
+@router.post("/ui/hr/employee-rewards/{record_id}/delete")
+def employee_reward_delete(record_id: int):
+    return hr_adjustment_delete("reward", record_id)
+
+
+@router.get("/ui/hr/employee-penalties", response_class=HTMLResponse)
+def employee_penalties_list(request: Request):
+    return hr_adjustment_list_page(request, "penalty")
+
+
+@router.get("/ui/hr/employee-penalties/new", response_class=HTMLResponse)
+def employee_penalty_new(request: Request):
+    return hr_adjustment_new_page(request, "penalty")
+
+
+@router.post("/ui/hr/employee-penalties/new")
+async def employee_penalty_create(request: Request):
+    return await hr_adjustment_create(request, "penalty")
+
+
+@router.get("/ui/hr/employee-penalties/{record_id}", response_class=HTMLResponse)
+def employee_penalty_open(request: Request, record_id: int):
+    return hr_adjustment_open_page(request, "penalty", record_id)
+
+
+@router.post("/ui/hr/employee-penalties/{record_id}/delete")
+def employee_penalty_delete(record_id: int):
+    return hr_adjustment_delete("penalty", record_id)
 
 
 @router.get("/ui/hr/employee-grants", response_class=HTMLResponse)
@@ -2899,6 +3385,7 @@ def payroll_unpost(run_id: int):
 
         delete_non_final_payroll_journal(conn, run)
         clear_payroll_advance_deductions(conn, run_id)
+        clear_payroll_hr_adjustments(conn, run_id)
 
         conn.execute(
             "UPDATE payroll_runs SET status = 'draft', payroll_journal_id = NULL WHERE id = ?",
@@ -2932,6 +3419,7 @@ def payroll_delete(run_id: int):
 
         delete_non_final_payroll_journal(conn, run)
         clear_payroll_advance_deductions(conn, run_id)
+        clear_payroll_hr_adjustments(conn, run_id)
         conn.execute("DELETE FROM payroll_lines WHERE payroll_run_id = ?", (run_id,))
         conn.execute("DELETE FROM payroll_runs WHERE id = ?", (run_id,))
         conn.commit()
