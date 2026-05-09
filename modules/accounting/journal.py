@@ -1365,8 +1365,7 @@ def reverse_journal_entry(conn, journal_id: int):
 
     conn.execute("""
         UPDATE journal_entries
-        SET status = 'reversed',
-            reversed_by_journal_id = ?,
+        SET reversed_by_journal_id = ?,
             reversed_by_id = ?
         WHERE id = ?
     """, (reverse_journal_id, reverse_journal_id, journal_id))
