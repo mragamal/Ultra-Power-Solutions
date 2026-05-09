@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from urllib.parse import urlencode
 
 from db import get_conn
 from layout import render_page
@@ -12,6 +13,11 @@ def money(x):
         return f"{float(x or 0):,.2f}"
     except Exception:
         return "0.00"
+
+
+def action_url(path, params):
+    clean = {k: v for k, v in params.items() if v not in (None, "")}
+    return path + ("?" + urlencode(clean) if clean else "")
 
 
 def get_partners(conn, partner_type: str):
@@ -258,6 +264,37 @@ def get_partner_opening_balance(conn, partner_type: str, partner_id: str, date_f
     return float(row["total_debit"] or 0) - float(row["total_credit"] or 0)
 
 
+def get_partner_summary_rows(conn, partner_type: str, date_from: str = "", date_to: str = "", filter_account: str = ""):
+    sql = """
+        SELECT
+            l.partner_type,
+            l.partner_id,
+            COALESCE(SUM(l.debit), 0) AS total_debit,
+            COALESCE(SUM(l.credit), 0) AS total_credit
+        FROM journal_lines l
+        JOIN journal_entries j ON j.id = l.journal_id
+        WHERE LOWER(COALESCE(j.status,'')) = 'posted'
+          AND LOWER(COALESCE(l.partner_type,'')) = LOWER(?)
+          AND COALESCE(l.partner_id, 0) > 0
+    """
+    params = [partner_type]
+
+    if filter_account:
+        sql += " AND COALESCE(l.account_code,'') = ?"
+        params.append(filter_account)
+
+    if date_from:
+        sql += " AND COALESCE(j.entry_date,'') >= ?"
+        params.append(date_from)
+
+    if date_to:
+        sql += " AND COALESCE(j.entry_date,'') <= ?"
+        params.append(date_to)
+
+    sql += " GROUP BY LOWER(COALESCE(l.partner_type,'')), l.partner_id ORDER BY l.partner_id"
+    return conn.execute(sql, params).fetchall()
+
+
 @router.get("/ui/accounting/partner-ledger/partners")
 def partner_options_api(partner_type: str = ""):
     conn = get_conn()
@@ -295,51 +332,53 @@ def partner_ledger(
         partner_account_code = get_partner_account_code(conn, partner_type, partner_id) if partner_id else None
         filter_account = request.query_params.get("account_code", "").strip()
 
-        opening_balance = get_partner_opening_balance(conn, partner_type, partner_id, date_from, filter_account)
-        balance = opening_balance
-
-        sql = """
-            SELECT
-                j.id AS journal_id,
-                j.entry_date,
-                j.entry_no,
-                j.reference,
-                j.description,
-                l.line_description,
-                l.partner_type,
-                l.partner_id,
-                l.account_code,
-                l.debit,
-                l.credit
-            FROM journal_lines l
-            JOIN journal_entries j ON j.id = l.journal_id
-            WHERE LOWER(COALESCE(j.status,'')) = 'posted'
-              AND LOWER(COALESCE(l.partner_type,'')) = LOWER(?)
-        """
-        params = [partner_type]
-
         if partner_id:
+            opening_balance = get_partner_opening_balance(conn, partner_type, partner_id, date_from, filter_account)
+            balance = opening_balance
+
+            sql = """
+                SELECT
+                    j.id AS journal_id,
+                    j.entry_date,
+                    j.entry_no,
+                    j.reference,
+                    j.description,
+                    l.line_description,
+                    l.partner_type,
+                    l.partner_id,
+                    l.account_code,
+                    l.debit,
+                    l.credit
+                FROM journal_lines l
+                JOIN journal_entries j ON j.id = l.journal_id
+                WHERE LOWER(COALESCE(j.status,'')) = 'posted'
+                  AND LOWER(COALESCE(l.partner_type,'')) = LOWER(?)
+            """
+            params = [partner_type]
+
             sql += " AND l.partner_id = ?"
             params.append(partner_id)
 
-        if filter_account:
-            sql += " AND COALESCE(l.account_code,'') = ?"
-            params.append(filter_account)
+            if filter_account:
+                sql += " AND COALESCE(l.account_code,'') = ?"
+                params.append(filter_account)
 
-        if date_from:
-            sql += " AND COALESCE(j.entry_date,'') >= ?"
-            params.append(date_from)
+            if date_from:
+                sql += " AND COALESCE(j.entry_date,'') >= ?"
+                params.append(date_from)
 
-        if date_to:
-            sql += " AND COALESCE(j.entry_date,'') <= ?"
-            params.append(date_to)
+            if date_to:
+                sql += " AND COALESCE(j.entry_date,'') <= ?"
+                params.append(date_to)
 
-        sql += " ORDER BY j.entry_date, j.id, COALESCE(l.line_no,0), l.id"
-        rows = conn.execute(sql, params).fetchall()
+            sql += " ORDER BY j.entry_date, j.id, COALESCE(l.line_no,0), l.id"
+            rows = conn.execute(sql, params).fetchall()
+        else:
+            rows = get_partner_summary_rows(conn, partner_type, date_from, date_to, filter_account)
 
     body = ""
 
-    if partner_type and date_from:
+    if partner_type and partner_id and date_from:
         body += f"""
         <tr style="background:#f3f4f6;font-weight:700;">
             <td></td>
@@ -355,31 +394,71 @@ def partner_ledger(
         </tr>
         """
 
-    for r in rows:
-        debit = float(r["debit"] or 0)
-        credit = float(r["credit"] or 0)
+    if partner_id:
+        for r in rows:
+            debit = float(r["debit"] or 0)
+            credit = float(r["credit"] or 0)
 
-        total_debit += debit
-        total_credit += credit
-        balance += debit - credit
+            total_debit += debit
+            total_credit += credit
+            balance += debit - credit
 
-        description = r["line_description"] or r["description"] or ""
-        row_partner = get_partner_display(conn, r["partner_type"], r["partner_id"])
+            description = r["line_description"] or r["description"] or ""
+            row_partner = get_partner_display(conn, r["partner_type"], r["partner_id"])
 
-        body += f"""
-        <tr>
-            <td>{r['entry_date'] or ''}</td>
-            <td>{row_partner}</td>
-            <td>{r['entry_no'] or ''}</td>
-            <td>{r['reference'] or ''}</td>
-            <td>{description}</td>
-            <td>{account_label(conn, r['account_code'])}</td>
-            <td>{money(debit)}</td>
-            <td>{money(credit)}</td>
-            <td>{money(balance)}</td>
-            <td><a class="btn gray" href="/ui/accounting/journal/{r['journal_id']}">Open</a></td>
-        </tr>
-        """
+            body += f"""
+            <tr>
+                <td>{r['entry_date'] or ''}</td>
+                <td>{row_partner}</td>
+                <td>{r['entry_no'] or ''}</td>
+                <td>{r['reference'] or ''}</td>
+                <td>{description}</td>
+                <td>{account_label(conn, r['account_code'])}</td>
+                <td>{money(debit)}</td>
+                <td>{money(credit)}</td>
+                <td>{money(balance)}</td>
+                <td><a class="btn gray" href="/ui/accounting/journal/{r['journal_id']}">Open</a></td>
+            </tr>
+            """
+
+    if partner_type and not partner_id and rows:
+        body = ""
+        total_debit = 0.0
+        total_credit = 0.0
+        for r in rows:
+            debit = float(r["total_debit"] or 0)
+            credit = float(r["total_credit"] or 0)
+            row_balance = debit - credit
+            total_debit += debit
+            total_credit += credit
+            row_partner = get_partner_display(conn, r["partner_type"], r["partner_id"])
+            ledger_href = action_url("/ui/accounting/partner-ledger", {
+                "partner_type": partner_type,
+                "partner_id": r["partner_id"],
+                "date_from": date_from,
+                "date_to": date_to,
+                "account_code": filter_account,
+            })
+            journals_href = action_url("/ui/accounting/journal", {
+                "status": "posted",
+                "partner_type": partner_type,
+                "partner_id": r["partner_id"],
+                "date_from": date_from,
+                "date_to": date_to,
+            })
+            body += f"""
+            <tr>
+                <td>{row_partner}</td>
+                <td>{money(debit)}</td>
+                <td>{money(credit)}</td>
+                <td>{money(row_balance)}</td>
+                <td>
+                    <a class="btn gray" href="{journals_href}">Journals</a>
+                    <a class="btn blue" href="{ledger_href}">Ledger</a>
+                </td>
+            </tr>
+            """
+        closing_balance = total_debit - total_credit
 
     if not body:
         body = """
@@ -442,7 +521,7 @@ def partner_ledger(
 
         <div class="card" style="margin-top:15px;">
             <p><b>Type:</b> {partner_type or ''}</p>
-            <p><b>Partner:</b> {partner_text}</p>
+            <p><b>Partner:</b> {partner_text or 'All Partners' if partner_type and not partner_id else partner_text}</p>
             <p><b>Partner Account:</b> {partner_account_code or ''}</p>
             <p><b>Opening Balance:</b> {money(opening_balance)}</p>
             <p><b>Total Debit:</b> {money(total_debit)}</p>
@@ -451,6 +530,15 @@ def partner_ledger(
         </div>
 
         <table style="margin-top:20px;">
+            {'''
+            <tr>
+                <th>Partner</th>
+                <th>Debit</th>
+                <th>Credit</th>
+                <th>Balance</th>
+                <th>Open</th>
+            </tr>
+            ''' if partner_type and not partner_id else '''
             <tr>
                 <th>Date</th>
                 <th>Partner</th>
@@ -463,6 +551,7 @@ def partner_ledger(
                 <th>Balance</th>
                 <th>Open</th>
             </tr>
+            '''}
             {body}
         </table>
     </div>

@@ -2032,6 +2032,8 @@ def journal_list(
     date_to: str = "",
     category: str = "",
     account_code: str = "",
+    partner_type: str = "",
+    partner_id: str = "",
 ):
     lang = get_lang(request)
     can_create = accounting_allowed(request, "create")
@@ -2044,10 +2046,25 @@ def journal_list(
     params = []
     where = []
 
-    if safe(account_code):
+    if safe(account_code) or safe(partner_type) or safe(partner_id):
         sql += " JOIN journal_lines account_filter_line ON account_filter_line.journal_id = je.id "
+
+    if safe(account_code):
         where.append("COALESCE(account_filter_line.account_code, '') = ?")
         params.append(safe(account_code))
+
+    if safe(partner_type):
+        where.append("LOWER(COALESCE(account_filter_line.partner_type, '')) = ?")
+        params.append(safe(partner_type).lower())
+
+    try:
+        partner_id_int = int(partner_id) if safe(partner_id) else 0
+    except Exception:
+        partner_id_int = 0
+
+    if partner_id_int:
+        where.append("COALESCE(account_filter_line.partner_id, 0) = ?")
+        params.append(partner_id_int)
 
     if status and status.lower() != "all":
         where.append("LOWER(COALESCE(je.status,'')) = ?")
@@ -2132,9 +2149,11 @@ def journal_list(
     account_filter_note = ""
     if safe(account_code):
         account_filter_note = f'<span class="summary-pill">{tr(lang, "Account", "الحساب")}: {safe(account_code)}</span>'
+    if safe(partner_type) or safe(partner_id):
+        account_filter_note += f'<span class="summary-pill">{tr(lang, "Partner", "الشريك")}: {safe(partner_type)} {safe(partner_id)}</span>'
 
     def tab(x, title):
-        href = f"/ui/accounting/journal?status={x}&search={safe(search)}&date_from={safe(date_from)}&date_to={safe(date_to)}&category={safe(category)}&account_code={safe(account_code)}"
+        href = f"/ui/accounting/journal?status={x}&search={safe(search)}&date_from={safe(date_from)}&date_to={safe(date_to)}&category={safe(category)}&account_code={safe(account_code)}&partner_type={safe(partner_type)}&partner_id={safe(partner_id)}"
         return f'<a class="page-tab {"active" if status == x else ""}" href="{with_lang(href, lang)}">{title}</a>'
 
     content = f"""
@@ -2177,6 +2196,8 @@ def journal_list(
                 <input type="hidden" name="lang" value="{lang}">
                 <input type="hidden" name="status" value="{safe(status)}">
                 <input type="hidden" name="account_code" value="{safe(account_code)}">
+                <input type="hidden" name="partner_type" value="{safe(partner_type)}">
+                <input type="hidden" name="partner_id" value="{safe(partner_id)}">
                 <div class="filter-grid" style="grid-template-columns: 1.4fr 1fr 1fr 1fr;">
                     <div class="form-group">
                         <label>{tr(lang, "Search", "بحث")}</label>
