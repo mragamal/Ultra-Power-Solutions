@@ -190,6 +190,53 @@ def _module_home_link(current_path: str):
     return ""
 
 
+def _section_back_info(current_path: str, lang: str, request=None):
+    path = str(current_path or "")
+
+    def label(en, ar):
+        return ar if lang == "ar" else en
+
+    partner_type = ""
+    try:
+        partner_type = (request.query_params.get("partner_type") or "").strip().lower()
+    except Exception:
+        partner_type = ""
+
+    if (
+        path.startswith("/ui/accounting/customers-hub")
+        or path.startswith("/ui/accounting/customer-statement")
+        or path.startswith("/ui/accounting/customer-invoices")
+        or (path.startswith("/ui/accounting/partner-ledger") and partner_type == "customer")
+    ):
+        return "/ui/accounting/customers-hub", label("Customers", "\u0627\u0644\u0639\u0645\u0644\u0627\u0621")
+
+    if (
+        path.startswith("/ui/accounting/vendors-hub")
+        or path.startswith("/ui/accounting/vendor-statement")
+        or path.startswith("/ui/accounting/vendor-bills")
+        or (path.startswith("/ui/accounting/partner-ledger") and partner_type == "vendor")
+    ):
+        return "/ui/accounting/vendors-hub", label("Vendors", "\u0627\u0644\u0645\u0648\u0631\u062f\u064a\u0646")
+
+    if (
+        path.startswith("/ui/hr/employees")
+        or (path.startswith("/ui/accounting/partner-ledger") and partner_type == "employee")
+    ):
+        return "/ui/hr/employees", label("Employees", "\u0627\u0644\u0645\u0648\u0638\u0641\u064a\u0646")
+
+    if path.startswith("/ui/accounting/petty-cash"):
+        return "/ui/accounting/petty-cash", label("Petty Cash", "\u0627\u0644\u0639\u0647\u062f")
+
+    if path.startswith("/ui/accounting/employee-advances"):
+        return "/ui/accounting/employee-advances", label("Employee Advances", "\u0633\u0644\u0641 \u0627\u0644\u0645\u0648\u0638\u0641\u064a\u0646")
+
+    if path.startswith("/ui/accounting/partner-ledger"):
+        return "/ui/accounting", label("Accounting", "\u0627\u0644\u062d\u0633\u0627\u0628\u0627\u062a")
+
+    fallback = _module_home_link(path)
+    return fallback, ("\u0627\u0644\u0631\u062c\u0648\u0639 \u0644\u0644\u0645\u0648\u062f\u064a\u0648\u0644" if lang == "ar" else "Back to Module")
+
+
 def render_page(title, content, lang="en", current_path=""):
     request = _request_from_stack()
     lang = _request_lang(request, lang)
@@ -198,9 +245,9 @@ def render_page(title, content, lang="en", current_path=""):
     title = _repair_arabic_mojibake(str(title or ""))
     content = _repair_arabic_mojibake(str(content or ""))
     sidebar_items_html = _sidebar_menu_items(request, current_path, lang)
-    module_home_href = _with_lang_url(_module_home_link(current_path), lang, company_prefix)
+    module_back_href, module_back_label = _section_back_info(current_path, lang, request)
+    module_home_href = _with_lang_url(module_back_href, lang, company_prefix)
     show_module_back = bool(module_home_href and current_path and current_path != module_home_href)
-    module_back_label = "الرجوع للموديول" if lang == "ar" else "Back to Module"
     language_label = "English" if lang == "ar" else "عربي"
     home_label = "الرئيسية" if lang == "ar" else "Home"
     logout_label = "تسجيل الخروج" if lang == "ar" else "Logout"

@@ -230,6 +230,34 @@ def get_opening_balance(conn, partner_type: str, partner_id: str, filter_account
     return float(row["total_debit"] or 0) - float(row["total_credit"] or 0)
 
 
+def get_partner_opening_balance(conn, partner_type: str, partner_id: str, date_from: str, filter_account: str = ""):
+    if not date_from or not partner_type:
+        return 0.0
+
+    sql = """
+        SELECT
+            COALESCE(SUM(l.debit), 0) AS total_debit,
+            COALESCE(SUM(l.credit), 0) AS total_credit
+        FROM journal_lines l
+        JOIN journal_entries j ON j.id = l.journal_id
+        WHERE LOWER(COALESCE(j.status,'')) = 'posted'
+          AND LOWER(COALESCE(l.partner_type,'')) = LOWER(?)
+          AND COALESCE(j.entry_date,'') < ?
+    """
+    params = [partner_type, date_from]
+
+    if partner_id:
+        sql += " AND l.partner_id = ?"
+        params.append(partner_id)
+
+    if filter_account:
+        sql += " AND COALESCE(l.account_code,'') = ?"
+        params.append(filter_account)
+
+    row = conn.execute(sql, params).fetchone()
+    return float(row["total_debit"] or 0) - float(row["total_credit"] or 0)
+
+
 @router.get("/ui/accounting/partner-ledger/partners")
 def partner_options_api(partner_type: str = ""):
     conn = get_conn()
@@ -262,19 +290,12 @@ def partner_ledger(
     partner_text = ""
     partner_account_code = None
 
-    if partner_id:
+    if partner_type:
         partner_text = get_partner_display(conn, partner_type, partner_id)
-        # We still fetch the default account but we won't force it in the query if we want a full statement
-        partner_account_code = get_partner_account_code(conn, partner_type, partner_id)
-        
-        # Check if user wants to filter by a specific account (passed via query)
+        partner_account_code = get_partner_account_code(conn, partner_type, partner_id) if partner_id else None
         filter_account = request.query_params.get("account_code", "").strip()
-        effective_filter_account = filter_account
-        if not effective_filter_account and partner_type != "employee" and partner_account_code:
-            effective_filter_account = partner_account_code
 
-        # Opening balance
-        opening_balance = get_opening_balance(conn, partner_type, partner_id, effective_filter_account, date_from)
+        opening_balance = get_partner_opening_balance(conn, partner_type, partner_id, date_from, filter_account)
         balance = opening_balance
 
         sql = """
@@ -285,27 +306,25 @@ def partner_ledger(
                 j.reference,
                 j.description,
                 l.line_description,
+                l.partner_type,
+                l.partner_id,
                 l.account_code,
                 l.debit,
                 l.credit
             FROM journal_lines l
             JOIN journal_entries j ON j.id = l.journal_id
             WHERE LOWER(COALESCE(j.status,'')) = 'posted'
-              AND l.partner_id = ?
               AND LOWER(COALESCE(l.partner_type,'')) = LOWER(?)
         """
-        params = [partner_id, partner_type]
+        params = [partner_type]
+
+        if partner_id:
+            sql += " AND l.partner_id = ?"
+            params.append(partner_id)
 
         if filter_account:
             sql += " AND COALESCE(l.account_code,'') = ?"
             params.append(filter_account)
-        elif partner_type == 'employee':
-            # For employees, don't force the default account unless specified, 
-            # to show salary, advances, and custody together.
-            pass
-        elif partner_account_code:
-            sql += " AND COALESCE(l.account_code,'') = ?"
-            params.append(partner_account_code)
 
         if date_from:
             sql += " AND COALESCE(j.entry_date,'') >= ?"
@@ -320,9 +339,10 @@ def partner_ledger(
 
     body = ""
 
-    if partner_id and date_from:
+    if partner_type and date_from:
         body += f"""
         <tr style="background:#f3f4f6;font-weight:700;">
+            <td></td>
             <td></td>
             <td>B/F</td>
             <td></td>
@@ -344,10 +364,12 @@ def partner_ledger(
         balance += debit - credit
 
         description = r["line_description"] or r["description"] or ""
+        row_partner = get_partner_display(conn, r["partner_type"], r["partner_id"])
 
         body += f"""
         <tr>
             <td>{r['entry_date'] or ''}</td>
+            <td>{row_partner}</td>
             <td>{r['entry_no'] or ''}</td>
             <td>{r['reference'] or ''}</td>
             <td>{description}</td>
@@ -362,7 +384,7 @@ def partner_ledger(
     if not body:
         body = """
         <tr>
-            <td colspan="9" style="text-align:center;">No ledger movements found.</td>
+            <td colspan="10" style="text-align:center;">No ledger movements found.</td>
         </tr>
         """
 
@@ -372,7 +394,7 @@ def partner_ledger(
     vendor_selected = "selected" if partner_type == "vendor" else ""
     employee_selected = "selected" if partner_type == "employee" else ""
 
-    partner_options_html = "<option value=''>Select Partner</option>"
+    partner_options_html = "<option value=''>All Partners</option>"
     if partner_type:
         items = get_partners(conn, partner_type)
         for item in items:
@@ -431,6 +453,7 @@ def partner_ledger(
         <table style="margin-top:20px;">
             <tr>
                 <th>Date</th>
+                <th>Partner</th>
                 <th>Entry</th>
                 <th>Reference</th>
                 <th>Description</th>
@@ -449,7 +472,7 @@ def partner_ledger(
         const ptype = document.getElementById("ptype").value || "";
         const partner = document.getElementById("partner");
 
-        partner.innerHTML = "<option value=''>Select Partner</option>";
+        partner.innerHTML = "<option value=''>All Partners</option>";
 
         if (!ptype) {{
             const prev0 = partner.previousElementSibling;
@@ -464,7 +487,7 @@ def partner_ledger(
         const res = await fetch(`/ui/accounting/partner-ledger/partners?partner_type=${{encodeURIComponent(ptype)}}`);
         const data = await res.json();
 
-        partner.innerHTML = "<option value=''>Select Partner</option>";
+        partner.innerHTML = "<option value=''>All Partners</option>";
 
         (data.items || []).forEach(item => {{
             const opt = document.createElement("option");
