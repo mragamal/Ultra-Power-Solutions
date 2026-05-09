@@ -1226,6 +1226,44 @@ def sync_vendor_bill_assets_after_final(conn, bill_id: int, journal_id: int):
             conn.execute("UPDATE vendor_bill_lines SET fixed_asset_id = ? WHERE id = ?", (cur.lastrowid, line["id"]))
 
 
+def remove_vendor_bill_assets_for_reversal(conn, bill_id: int):
+    if not bill_id or not table_exists(conn, "fixed_assets"):
+        return
+
+    ensure_column(conn, "fixed_assets", "source_vendor_bill_id", "ALTER TABLE fixed_assets ADD COLUMN source_vendor_bill_id INTEGER")
+    ensure_column(conn, "vendor_bill_lines", "fixed_asset_id", "ALTER TABLE vendor_bill_lines ADD COLUMN fixed_asset_id INTEGER")
+
+    conn.execute("""
+        DELETE FROM fixed_assets
+        WHERE source_vendor_bill_id = ?
+          AND id NOT IN (
+              SELECT COALESCE(asset_id, 0)
+              FROM asset_depreciation_moves
+          )
+          AND id NOT IN (
+              SELECT COALESCE(asset_id, 0)
+              FROM asset_disposals
+          )
+    """, (bill_id,))
+
+    conn.execute("""
+        UPDATE fixed_assets
+        SET status = 'reversed'
+        WHERE source_vendor_bill_id = ?
+    """, (bill_id,))
+
+    conn.execute("""
+        UPDATE vendor_bill_lines
+        SET fixed_asset_id = NULL
+        WHERE bill_id = ?
+          AND fixed_asset_id NOT IN (
+              SELECT id
+              FROM fixed_assets
+              WHERE source_vendor_bill_id = ?
+          )
+    """, (bill_id, bill_id))
+
+
 def sync_source_document_from_journal(conn, journal_id: int):
     entry = get_entry(conn, journal_id)
     if not entry:
@@ -1331,6 +1369,17 @@ def reverse_journal_entry(conn, journal_id: int):
             reversed_by_journal_id = ?
         WHERE id = ?
     """, (reverse_journal_id, journal_id))
+
+    if safe(entry["source_type"]).lower() == "vendor_bill" and safe(entry["source_id"]):
+        bill_id = int(entry["source_id"])
+        conn.execute("""
+            UPDATE vendor_bills
+            SET status = 'reversed',
+                reversed_journal_id = ?,
+                payment_status = 'cancelled'
+            WHERE id = ?
+        """, (reverse_journal_id, bill_id))
+        remove_vendor_bill_assets_for_reversal(conn, bill_id)
 
     return reverse_journal_id
 

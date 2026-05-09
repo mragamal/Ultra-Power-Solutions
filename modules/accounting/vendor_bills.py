@@ -512,6 +512,41 @@ def sync_vendor_bill_fixed_assets(conn, bill_id: int, final_posted: bool = False
         """, (bill_id,))
 
 
+def remove_vendor_bill_fixed_assets(conn, bill_id: int):
+    if not bill_id:
+        return
+
+    conn.execute("""
+        DELETE FROM fixed_assets
+        WHERE source_vendor_bill_id = ?
+          AND id NOT IN (
+              SELECT COALESCE(asset_id, 0)
+              FROM asset_depreciation_moves
+          )
+          AND id NOT IN (
+              SELECT COALESCE(asset_id, 0)
+              FROM asset_disposals
+          )
+    """, (bill_id,))
+
+    conn.execute("""
+        UPDATE fixed_assets
+        SET status = 'reversed'
+        WHERE source_vendor_bill_id = ?
+    """, (bill_id,))
+
+    conn.execute("""
+        UPDATE vendor_bill_lines
+        SET fixed_asset_id = NULL
+        WHERE bill_id = ?
+          AND fixed_asset_id NOT IN (
+              SELECT id
+              FROM fixed_assets
+              WHERE source_vendor_bill_id = ?
+          )
+    """, (bill_id, bill_id))
+
+
 def get_vendor(conn, vendor_id: int):
     return conn.execute("""
         SELECT *
@@ -1980,7 +2015,6 @@ async def create_vendor_bill(request: Request):
             """, (bill_id, item["file_url"], item["file_name"]))
 
         create_vendor_bill_draft_journal(conn, bill_id)
-        sync_vendor_bill_fixed_assets(conn, bill_id)
         safe_log_action(
             "vendor_bill",
             bill_id,
@@ -2179,7 +2213,6 @@ async def update_vendor_bill(request: Request, row_id: int):
             delete_draft_journal_entry(conn, old_journal_id)
 
         create_vendor_bill_draft_journal(conn, row_id)
-        sync_vendor_bill_fixed_assets(conn, row_id)
         if safe(existing["status"]).lower() == "posted":
             refreshed = conn.execute("SELECT journal_id FROM vendor_bills WHERE id = ?", (row_id,)).fetchone()
             if refreshed and refreshed["journal_id"]:
@@ -2286,6 +2319,7 @@ def reverse_vendor_bill(request: Request, row_id: int):
                 payment_status = 'cancelled'
             WHERE id = ?
         """, (reverse_id, row_id))
+        remove_vendor_bill_fixed_assets(conn, row_id)
         safe_log_action(
             "vendor_bill",
             row_id,
