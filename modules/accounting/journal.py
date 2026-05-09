@@ -1366,9 +1366,16 @@ def reverse_journal_entry(conn, journal_id: int):
     conn.execute("""
         UPDATE journal_entries
         SET status = 'reversed',
-            reversed_by_journal_id = ?
+            reversed_by_journal_id = ?,
+            reversed_by_id = ?
         WHERE id = ?
-    """, (reverse_journal_id, journal_id))
+    """, (reverse_journal_id, reverse_journal_id, journal_id))
+
+    conn.execute("""
+        UPDATE journal_entries
+        SET reversed_from_id = ?
+        WHERE id = ?
+    """, (journal_id, reverse_journal_id))
 
     if safe(entry["source_type"]).lower() == "vendor_bill" and safe(entry["source_id"]):
         bill_id = int(entry["source_id"])

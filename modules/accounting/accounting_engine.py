@@ -31,6 +31,17 @@ def ensure_column(conn, table_name, column_name, alter_sql):
         conn.execute(alter_sql)
 
 
+def table_exists(conn, table_name: str) -> bool:
+    row = conn.execute("""
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = ?
+        LIMIT 1
+    """, (safe(table_name),)).fetchone()
+    return row is not None
+
+
 def ensure_journal_tables():
     conn = get_conn()
 
@@ -73,6 +84,7 @@ def ensure_journal_tables():
     ensure_column(conn, "journal_entries", "source_id", "ALTER TABLE journal_entries ADD COLUMN source_id INTEGER")
     ensure_column(conn, "journal_entries", "reversed_from_id", "ALTER TABLE journal_entries ADD COLUMN reversed_from_id INTEGER")
     ensure_column(conn, "journal_entries", "reversed_by_id", "ALTER TABLE journal_entries ADD COLUMN reversed_by_id INTEGER")
+    ensure_column(conn, "journal_entries", "reversed_by_journal_id", "ALTER TABLE journal_entries ADD COLUMN reversed_by_journal_id INTEGER")
     ensure_column(conn, "journal_entries", "created_at", "ALTER TABLE journal_entries ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
 
     ensure_column(conn, "journal_lines", "journal_id", "ALTER TABLE journal_lines ADD COLUMN journal_id INTEGER")
@@ -174,8 +186,69 @@ def ensure_not_reversed(conn, journal_id: int):
     if not row:
         raise Exception("Journal entry not found")
 
-    if row["reversed_by_id"]:
+    reversed_by_id = row["reversed_by_id"] if "reversed_by_id" in row.keys() else None
+    reversed_by_journal_id = row["reversed_by_journal_id"] if "reversed_by_journal_id" in row.keys() else None
+
+    if reversed_by_id or reversed_by_journal_id:
         raise Exception("Journal entry already reversed")
+
+
+def _cleanup_vendor_bill_assets_for_reversal(conn, bill_id: int):
+    if not bill_id or not table_exists(conn, "fixed_assets"):
+        return
+
+    ensure_column(conn, "fixed_assets", "source_vendor_bill_id", "ALTER TABLE fixed_assets ADD COLUMN source_vendor_bill_id INTEGER")
+    ensure_column(conn, "vendor_bill_lines", "fixed_asset_id", "ALTER TABLE vendor_bill_lines ADD COLUMN fixed_asset_id INTEGER")
+
+    protected_ids = set()
+    if table_exists(conn, "asset_depreciation_moves"):
+        for row in conn.execute("SELECT COALESCE(asset_id, 0) AS asset_id FROM asset_depreciation_moves").fetchall():
+            protected_ids.add(int(row["asset_id"] or 0))
+    if table_exists(conn, "asset_disposals"):
+        for row in conn.execute("SELECT COALESCE(asset_id, 0) AS asset_id FROM asset_disposals").fetchall():
+            protected_ids.add(int(row["asset_id"] or 0))
+
+    assets = conn.execute("""
+        SELECT id
+        FROM fixed_assets
+        WHERE source_vendor_bill_id = ?
+    """, (bill_id,)).fetchall()
+
+    for asset in assets:
+        asset_id = int(asset["id"])
+        if asset_id in protected_ids:
+            conn.execute("UPDATE fixed_assets SET status = 'reversed' WHERE id = ?", (asset_id,))
+        else:
+            conn.execute("DELETE FROM fixed_assets WHERE id = ?", (asset_id,))
+
+    conn.execute("""
+        UPDATE vendor_bill_lines
+        SET fixed_asset_id = NULL
+        WHERE bill_id = ?
+          AND fixed_asset_id NOT IN (
+              SELECT id
+              FROM fixed_assets
+              WHERE source_vendor_bill_id = ?
+          )
+    """, (bill_id, bill_id))
+
+
+def _sync_source_document_after_reverse(conn, entry, reverse_journal_id: int):
+    source_type = safe(entry["source_type"]).lower()
+    try:
+        source_id = int(entry["source_id"] or 0)
+    except Exception:
+        source_id = 0
+
+    if source_type == "vendor_bill" and source_id > 0 and table_exists(conn, "vendor_bills"):
+        conn.execute("""
+            UPDATE vendor_bills
+            SET status = 'reversed',
+                reversed_journal_id = ?,
+                payment_status = 'cancelled'
+            WHERE id = ?
+        """, (reverse_journal_id, source_id))
+        _cleanup_vendor_bill_assets_for_reversal(conn, source_id)
 
 
 def validate_lines(conn, lines: list):
@@ -422,8 +495,8 @@ def reverse_journal_entry(conn, journal_id: int):
         conn=conn,
         entry_date=safe(entry["entry_date"]),
         description=f"Reversal of {safe(entry['entry_no'])}",
-        reference=f"REV-{safe(entry['reference']) or safe(entry['entry_no'])}",
-        source_type="reversal",
+        reference=f"REV-{safe(entry['entry_no'])}",
+        source_type="journal_reverse",
         source_id=journal_id,
         lines=reversed_lines,
     )
@@ -432,15 +505,19 @@ def reverse_journal_entry(conn, journal_id: int):
 
     conn.execute("""
         UPDATE journal_entries
-        SET reversed_by_id = ?
+        SET status = 'reversed',
+            reversed_by_id = ?,
+            reversed_by_journal_id = ?
         WHERE id = ?
-    """, (reverse_journal_id, journal_id))
+    """, (reverse_journal_id, reverse_journal_id, journal_id))
 
     conn.execute("""
         UPDATE journal_entries
         SET reversed_from_id = ?
         WHERE id = ?
     """, (journal_id, reverse_journal_id))
+
+    _sync_source_document_after_reverse(conn, entry, reverse_journal_id)
 
     return reverse_journal_id
 
