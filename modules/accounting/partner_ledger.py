@@ -472,9 +472,17 @@ def partner_ledger(
     customer_selected = "selected" if partner_type == "customer" else ""
     vendor_selected = "selected" if partner_type == "vendor" else ""
     employee_selected = "selected" if partner_type == "employee" else ""
+    partner_type_labels = {
+        "customer": "Customers",
+        "vendor": "Vendors",
+        "employee": "Employees",
+    }
+    all_partner_label = f"All {partner_type_labels.get(partner_type, 'Partners')}"
 
-    partner_options_html = "<option value=''>All Partners</option>"
+    partner_disabled = "disabled" if not partner_type else ""
+    partner_options_html = "<option value=''>Select Type First</option>"
     if partner_type:
+        partner_options_html = f"<option value=''>{all_partner_label}</option>"
         items = get_partners(conn, partner_type)
         for item in items:
             sel = "selected" if str(item["id"]) == str(partner_id) else ""
@@ -498,7 +506,7 @@ def partner_ledger(
 
                 <div class="col">
                     <label>Partner</label>
-                    <select name="partner_id" id="partner">
+                    <select name="partner_id" id="partner" {partner_disabled}>
                         {partner_options_html}
                     </select>
                 </div>
@@ -521,7 +529,7 @@ def partner_ledger(
 
         <div class="card" style="margin-top:15px;">
             <p><b>Type:</b> {partner_type or ''}</p>
-            <p><b>Partner:</b> {partner_text or 'All Partners' if partner_type and not partner_id else partner_text}</p>
+            <p><b>Partner:</b> {all_partner_label if partner_type and not partner_id else partner_text}</p>
             <p><b>Partner Account:</b> {partner_account_code or ''}</p>
             <p><b>Opening Balance:</b> {money(opening_balance)}</p>
             <p><b>Total Debit:</b> {money(total_debit)}</p>
@@ -561,9 +569,9 @@ def partner_ledger(
         const ptype = document.getElementById("ptype").value || "";
         const partner = document.getElementById("partner");
 
-        partner.innerHTML = "<option value=''>All Partners</option>";
-
         if (!ptype) {{
+            partner.innerHTML = "<option value=''>Select Type First</option>";
+            partner.disabled = true;
             const prev0 = partner.previousElementSibling;
             if (prev0 && prev0.tagName !== "SELECT") {{
                 prev0.remove();
@@ -576,7 +584,13 @@ def partner_ledger(
         const res = await fetch(`/ui/accounting/partner-ledger/partners?partner_type=${{encodeURIComponent(ptype)}}`);
         const data = await res.json();
 
-        partner.innerHTML = "<option value=''>All Partners</option>";
+        const allLabels = {{
+            customer: "All Customers",
+            vendor: "All Vendors",
+            employee: "All Employees"
+        }};
+        partner.disabled = false;
+        partner.innerHTML = `<option value="">${{allLabels[ptype] || "All Partners"}}</option>`;
 
         (data.items || []).forEach(item => {{
             const opt = document.createElement("option");
