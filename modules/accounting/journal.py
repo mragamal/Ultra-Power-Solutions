@@ -11,6 +11,7 @@ from audit import actor_name_from_request, render_audit_log_card, safe_log_actio
 from auth import can, current_user
 from db import get_conn
 from layout import render_page
+from modules.accounting.accounting_engine import reverse_journal_entry as engine_reverse_journal_entry
 from modules.accounting.allocation_engine import (
     get_allocated_total_for_document,
     refresh_customer_invoice_payment_status,
@@ -1321,81 +1322,7 @@ def post_journal_entry(conn, journal_id: int):
 
 
 def reverse_journal_entry(conn, journal_id: int):
-    entry = get_entry(conn, journal_id)
-    if not entry:
-        raise Exception("Journal entry not found")
-
-    status = safe(entry["status"]).lower()
-    if status != "posted":
-        raise Exception("Only posted entries can be reversed")
-    if entry["reversed_by_journal_id"]:
-        raise Exception("Journal entry already reversed")
-
-    original_lines = get_entry_lines(conn, journal_id)
-    if not original_lines:
-        raise Exception("Original journal has no lines")
-
-    reverse_entry_no = next_entry_no(conn)
-
-    cur = conn.execute("""
-        INSERT INTO journal_entries (
-            entry_no, entry_date, description, reference, status,
-            source_type, source_id
-        )
-        VALUES (?, ?, ?, ?, 'posted', 'journal_reverse', ?)
-    """, (
-        reverse_entry_no,
-        entry["entry_date"],
-        f"Reversal of {entry['entry_no']} - {safe(entry['description'])}",
-        f"REV-{safe(entry['entry_no'])}",
-        journal_id,
-    ))
-    reverse_journal_id = cur.lastrowid
-
-    for idx, line in enumerate(original_lines, start=1):
-        conn.execute("""
-            INSERT INTO journal_lines (
-                journal_id, line_no, line_description, account_code,
-                debit, credit, partner_type, partner_id, cost_center_id
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            reverse_journal_id,
-            idx,
-            f"Reverse - {safe(line['line_description'])}",
-            safe(line["account_code"]),
-            float(q2(line["credit"])),
-            float(q2(line["debit"])),
-            safe(line["partner_type"]),
-            line["partner_id"],
-            line["cost_center_id"],
-        ))
-
-    conn.execute("""
-        UPDATE journal_entries
-        SET reversed_by_journal_id = ?,
-            reversed_by_id = ?
-        WHERE id = ?
-    """, (reverse_journal_id, reverse_journal_id, journal_id))
-
-    conn.execute("""
-        UPDATE journal_entries
-        SET reversed_from_id = ?
-        WHERE id = ?
-    """, (journal_id, reverse_journal_id))
-
-    if safe(entry["source_type"]).lower() == "vendor_bill" and safe(entry["source_id"]):
-        bill_id = int(entry["source_id"])
-        conn.execute("""
-            UPDATE vendor_bills
-            SET status = 'reversed',
-                reversed_journal_id = ?,
-                payment_status = 'cancelled'
-            WHERE id = ?
-        """, (reverse_journal_id, bill_id))
-        remove_vendor_bill_assets_for_reversal(conn, bill_id)
-
-    return reverse_journal_id
+    return engine_reverse_journal_entry(conn, journal_id)
 
 
 # =========================================================

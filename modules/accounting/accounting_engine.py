@@ -57,6 +57,7 @@ def ensure_journal_tables():
             source_id INTEGER,
             reversed_from_id INTEGER,
             reversed_by_id INTEGER,
+            reversal_of_journal_id INTEGER,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -85,6 +86,7 @@ def ensure_journal_tables():
     ensure_column(conn, "journal_entries", "reversed_from_id", "ALTER TABLE journal_entries ADD COLUMN reversed_from_id INTEGER")
     ensure_column(conn, "journal_entries", "reversed_by_id", "ALTER TABLE journal_entries ADD COLUMN reversed_by_id INTEGER")
     ensure_column(conn, "journal_entries", "reversed_by_journal_id", "ALTER TABLE journal_entries ADD COLUMN reversed_by_journal_id INTEGER")
+    ensure_column(conn, "journal_entries", "reversal_of_journal_id", "ALTER TABLE journal_entries ADD COLUMN reversal_of_journal_id INTEGER")
     ensure_column(conn, "journal_entries", "created_at", "ALTER TABLE journal_entries ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
 
     ensure_column(conn, "journal_lines", "journal_id", "ALTER TABLE journal_lines ADD COLUMN journal_id INTEGER")
@@ -188,8 +190,17 @@ def ensure_not_reversed(conn, journal_id: int):
 
     reversed_by_id = row["reversed_by_id"] if "reversed_by_id" in row.keys() else None
     reversed_by_journal_id = row["reversed_by_journal_id"] if "reversed_by_journal_id" in row.keys() else None
+    existing_reversal = None
+    if "reversal_of_journal_id" in row.keys():
+        existing_reversal = conn.execute("""
+            SELECT id
+            FROM journal_entries
+            WHERE reversal_of_journal_id = ?
+              AND COALESCE(status, '') <> 'deleted'
+            LIMIT 1
+        """, (journal_id,)).fetchone()
 
-    if reversed_by_id or reversed_by_journal_id:
+    if reversed_by_id or reversed_by_journal_id or existing_reversal:
         raise Exception("Journal entry already reversed")
 
 
@@ -501,6 +512,13 @@ def reverse_journal_entry(conn, journal_id: int):
         lines=reversed_lines,
     )
 
+    conn.execute("""
+        UPDATE journal_entries
+        SET reversal_of_journal_id = ?,
+            reversed_from_id = ?
+        WHERE id = ?
+    """, (journal_id, journal_id, reverse_journal_id))
+
     post_journal_entry(conn, reverse_journal_id)
 
     conn.execute("""
@@ -509,12 +527,6 @@ def reverse_journal_entry(conn, journal_id: int):
             reversed_by_journal_id = ?
         WHERE id = ?
     """, (reverse_journal_id, reverse_journal_id, journal_id))
-
-    conn.execute("""
-        UPDATE journal_entries
-        SET reversed_from_id = ?
-        WHERE id = ?
-    """, (journal_id, reverse_journal_id))
 
     _sync_source_document_after_reverse(conn, entry, reverse_journal_id)
 

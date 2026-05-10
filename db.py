@@ -181,7 +181,10 @@ def init_db():
                 status TEXT DEFAULT 'draft',
                 source_type TEXT,
                 source_id INTEGER,
+                reversed_from_id INTEGER,
+                reversed_by_id INTEGER,
                 reversed_by_journal_id INTEGER,
+                reversal_of_journal_id INTEGER,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -190,7 +193,10 @@ def init_db():
         ensure_column(conn, "journal_entries", "status", "ALTER TABLE journal_entries ADD COLUMN status TEXT DEFAULT 'draft'")
         ensure_column(conn, "journal_entries", "source_type", "ALTER TABLE journal_entries ADD COLUMN source_type TEXT")
         ensure_column(conn, "journal_entries", "source_id", "ALTER TABLE journal_entries ADD COLUMN source_id INTEGER")
+        ensure_column(conn, "journal_entries", "reversed_from_id", "ALTER TABLE journal_entries ADD COLUMN reversed_from_id INTEGER")
+        ensure_column(conn, "journal_entries", "reversed_by_id", "ALTER TABLE journal_entries ADD COLUMN reversed_by_id INTEGER")
         ensure_column(conn, "journal_entries", "reversed_by_journal_id", "ALTER TABLE journal_entries ADD COLUMN reversed_by_journal_id INTEGER")
+        ensure_column(conn, "journal_entries", "reversal_of_journal_id", "ALTER TABLE journal_entries ADD COLUMN reversal_of_journal_id INTEGER")
         ensure_column(conn, "journal_entries", "created_at", "ALTER TABLE journal_entries ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
 
         # =========================
