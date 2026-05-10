@@ -130,89 +130,6 @@ def get_vendor_statement_rows(conn, vendor_id: int, date_from: str = "", date_to
 
     rows = []
 
-    bill_sql = """
-        SELECT
-            id,
-            bill_date AS trx_date,
-            bill_no AS doc_no,
-            due_date,
-            description,
-            net_amount AS amount
-        FROM vendor_bills
-        WHERE vendor_id = ?
-          AND status = 'posted'
-          AND COALESCE(reversed_journal_id, 0) = 0
-    """
-    bill_params = [vendor_id]
-
-    payment_sql = """
-        SELECT
-            id,
-            voucher_date AS trx_date,
-            voucher_no AS doc_no,
-            '' AS due_date,
-            description,
-            amount
-        FROM cash_vouchers
-        WHERE LOWER(COALESCE(voucher_type,'')) = 'payment'
-          AND LOWER(COALESCE(party_type,'')) = 'vendor'
-          AND COALESCE(party_id, 0) = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-    """
-    payment_params = [vendor_id]
-
-    if date_from:
-        bill_sql += " AND COALESCE(bill_date, '') >= ?"
-        payment_sql += " AND COALESCE(voucher_date, '') >= ?"
-        bill_params.append(date_from)
-        payment_params.append(date_from)
-
-    if date_to:
-        bill_sql += " AND COALESCE(bill_date, '') <= ?"
-        payment_sql += " AND COALESCE(voucher_date, '') <= ?"
-        bill_params.append(date_to)
-        payment_params.append(date_to)
-
-    bill_sql += " ORDER BY trx_date, id"
-    payment_sql += " ORDER BY trx_date, id"
-
-    bill_rows = conn.execute(bill_sql, bill_params).fetchall()
-    payment_rows = conn.execute(payment_sql, payment_params).fetchall()
-
-    for r in bill_rows:
-        amount = Decimal(str(r["amount"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
-        rows.append({
-            "trx_date": safe(r["trx_date"]),
-            "doc_type": "Bill",
-            "doc_no": safe(r["doc_no"]),
-            "due_date": safe(r["due_date"]),
-            "description": safe(r["description"]),
-            "debit": Decimal("0.00"),
-            "credit": amount,
-            "allocated": Decimal("0.00"),
-            "open_amount": Decimal("0.00"),
-            "unapplied": Decimal("0.00"),
-            "reference": "",
-            "sort_key": (safe(r["trx_date"]), 1, safe(r["doc_no"]), str(r["id"])),
-        })
-
-    for r in payment_rows:
-        amount = Decimal(str(r["amount"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
-        rows.append({
-            "trx_date": safe(r["trx_date"]),
-            "doc_type": "Payment",
-            "doc_no": safe(r["doc_no"]),
-            "due_date": "",
-            "description": safe(r["description"]),
-            "debit": amount,
-            "credit": Decimal("0.00"),
-            "allocated": Decimal("0.00"),
-            "open_amount": Decimal("0.00"),
-            "unapplied": Decimal("0.00"),
-            "reference": "",
-            "sort_key": (safe(r["trx_date"]), 2, safe(r["doc_no"]), str(r["id"])),
-        })
-
     partner_account_code = get_vendor_partner_account_code(conn, vendor_id)
     if partner_account_code:
         sql = """
@@ -255,16 +172,15 @@ def get_vendor_statement_rows(conn, vendor_id: int, date_from: str = "", date_to
                 "unapplied": Decimal("0.00"),
                 "journal_id": safe_int(r["journal_id"]),
                 "reference": safe(r["reference"]),
-                "sort_key": (safe(r["trx_date"]), 3, safe(r["doc_no"]), str(safe_int(r["journal_id"]))),
+                "sort_key": (safe(r["trx_date"]), 1, safe(r["doc_no"]), str(safe_int(r["journal_id"]))),
             })
 
     rows.sort(key=lambda x: x["sort_key"])
 
-    opening_balance = (
-        get_vendor_opening_journal_balance(conn, vendor_id, date_from)
-        + get_opening_vendor_bill_balance(conn, vendor_id, date_from)
-        - get_opening_vendor_payment_balance(conn, vendor_id, date_from)
-    ).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
+    opening_balance = get_vendor_opening_journal_balance(conn, vendor_id, date_from).quantize(
+        Decimal("1.00"),
+        rounding=ROUND_HALF_UP,
+    )
     running_balance = opening_balance
     total_debit = Decimal("0.00")
     total_credit = Decimal("0.00")

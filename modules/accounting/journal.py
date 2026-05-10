@@ -2118,6 +2118,34 @@ def journal_list(
             "reversed": f'<span class="badge red">{tr(lang, "Reversed", "معكوس")}</span>',
         }.get(safe(row["status"]).lower(), safe(row["status"]))
         category_badge = f'<span class="status-chip gray">{journal_category_label(row["source_type"], lang)}</span>'
+        reverse_note = ""
+        row_keys = row.keys()
+        reversed_by_journal_id = safe_int(row["reversed_by_journal_id"]) if "reversed_by_journal_id" in row_keys else 0
+        reversed_from_id = safe_int(row["reversed_from_id"]) if "reversed_from_id" in row_keys else 0
+        if reversed_by_journal_id:
+            reverse_row = conn.execute(
+                "SELECT entry_no FROM journal_entries WHERE id = ?",
+                (reversed_by_journal_id,),
+            ).fetchone()
+            reverse_no = safe(reverse_row["entry_no"]) if reverse_row else str(reversed_by_journal_id)
+            reverse_note = (
+                f'<div class="muted" style="font-size:12px;margin-top:4px;">'
+                f'{tr(lang, "Reversed by", "تم عكسه بقيد")}: '
+                f'<a href="{with_lang(f"/ui/accounting/journal/{reversed_by_journal_id}", lang)}">{reverse_no}</a>'
+                f'</div>'
+            )
+        elif reversed_from_id:
+            reverse_row = conn.execute(
+                "SELECT entry_no FROM journal_entries WHERE id = ?",
+                (reversed_from_id,),
+            ).fetchone()
+            reverse_no = safe(reverse_row["entry_no"]) if reverse_row else str(reversed_from_id)
+            reverse_note = (
+                f'<div class="muted" style="font-size:12px;margin-top:4px;">'
+                f'{tr(lang, "Reversal of", "عكس للقيد")}: '
+                f'<a href="{with_lang(f"/ui/accounting/journal/{reversed_from_id}", lang)}">{reverse_no}</a>'
+                f'</div>'
+            )
         action_html = f'<a class="action-btn blue" href="{with_lang(f"/ui/accounting/journal/{row["id"]}", lang)}">{tr(lang, "Open", "Open")}</a>'
         if can_edit_journal_entry(request, row):
             action_html += f"""
@@ -2134,7 +2162,7 @@ def journal_list(
             <td>{safe(row['entry_date'])}</td>
             <td>{category_badge}</td>
             <td>{safe(row['description'])}</td>
-            <td>{safe(row['reference'])}</td>
+            <td>{safe(row['reference'])}{reverse_note}</td>
             <td class="number-cell">{money(total_debit)}</td>
             <td class="number-cell">{money(total_credit)}</td>
             <td>{badge}</td>

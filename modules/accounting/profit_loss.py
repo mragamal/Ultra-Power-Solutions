@@ -305,6 +305,19 @@ def build_pl_data(date_from: str = "", date_to: str = ""):
         elif category == "opex":
             opex_rows.append(row)
 
+    revenue_rows = [
+        r for r in revenue_rows
+        if abs(float(r["total_credit"] or 0) - float(r["total_debit"] or 0)) >= 0.005
+    ]
+    cogs_rows = [
+        r for r in cogs_rows
+        if abs(float(r["total_debit"] or 0) - float(r["total_credit"] or 0)) >= 0.005
+    ]
+    opex_rows = [
+        r for r in opex_rows
+        if abs(float(r["total_debit"] or 0) - float(r["total_credit"] or 0)) >= 0.005
+    ]
+
     total_income = sum((float(r["total_credit"] or 0) - float(r["total_debit"] or 0) for r in revenue_rows), 0.0)
     total_cogs = sum((float(r["total_debit"] or 0) - float(r["total_credit"] or 0) for r in cogs_rows), 0.0)
     total_opex = sum((float(r["total_debit"] or 0) - float(r["total_credit"] or 0) for r in opex_rows), 0.0)
