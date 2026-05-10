@@ -171,23 +171,42 @@ def _sidebar_menu_items(request, current_path="", lang=None):
     return "".join(html)
 
 
-def _module_home_link(current_path: str):
+def _module_home_info(current_path: str, lang: str = "en"):
     path = str(current_path or "")
+    labels = {
+        "accounting": ("Accounting", "\u0627\u0644\u062d\u0633\u0627\u0628\u0627\u062a"),
+        "hr": ("HR", "\u0627\u0644\u0645\u0648\u0627\u0631\u062f \u0627\u0644\u0628\u0634\u0631\u064a\u0629"),
+        "inventory": ("Inventory", "\u0627\u0644\u0645\u062e\u0627\u0632\u0646"),
+        "purchasing": ("Purchasing", "\u0627\u0644\u0645\u0634\u062a\u0631\u064a\u0627\u062a"),
+        "sales": ("Sales", "\u0627\u0644\u0645\u0628\u064a\u0639\u0627\u062a"),
+        "operations": ("Operations", "\u0627\u0644\u062a\u0634\u063a\u064a\u0644"),
+        "users": ("Users", "\u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645\u0648\u0646"),
+    }
+
+    def module_label(key: str):
+        en, ar = labels[key]
+        return ar if lang == "ar" else en
+
     if path.startswith("/ui/accounting"):
-        return "/ui/accounting"
+        return "/ui/accounting", module_label("accounting")
     if path.startswith("/ui/hr"):
-        return "/ui/hr"
+        return "/ui/hr", module_label("hr")
     if path.startswith("/ui/inventory"):
-        return "/ui/inventory"
+        return "/ui/inventory", module_label("inventory")
     if path.startswith("/ui/purchasing"):
-        return "/ui/purchasing"
+        return "/ui/purchasing", module_label("purchasing")
     if path.startswith("/ui/sales"):
-        return "/ui/sales"
+        return "/ui/sales", module_label("sales")
     if path.startswith("/ui/operations"):
-        return "/ui/operations"
+        return "/ui/operations", module_label("operations")
     if path.startswith("/ui/system"):
-        return "/ui/system/users"
-    return ""
+        return "/ui/system/users", module_label("users")
+    return "", ""
+
+
+def _module_home_link(current_path: str):
+    href, _ = _module_home_info(current_path, "en")
+    return href
 
 
 def _section_back_info(current_path: str, lang: str, request=None):
@@ -233,8 +252,7 @@ def _section_back_info(current_path: str, lang: str, request=None):
     if path.startswith("/ui/accounting/partner-ledger"):
         return "/ui/accounting", label("Accounting", "\u0627\u0644\u062d\u0633\u0627\u0628\u0627\u062a")
 
-    fallback = _module_home_link(path)
-    return fallback, ("\u0627\u0644\u0631\u062c\u0648\u0639 \u0644\u0644\u0645\u0648\u062f\u064a\u0648\u0644" if lang == "ar" else "Back to Module")
+    return _module_home_info(path, lang)
 
 
 def render_page(title, content, lang="en", current_path=""):

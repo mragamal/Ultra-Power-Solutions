@@ -27,6 +27,14 @@ def safe(x):
     return "" if x is None else str(x).strip()
 
 
+def safe_int(x, default=0):
+    try:
+        text = safe(x).replace(",", "")
+        return int(text) if text else default
+    except (TypeError, ValueError):
+        return default
+
+
 def get_lang(request: Request | None = None):
     try:
         if request and safe(request.query_params.get("lang")).lower() == "ar":
