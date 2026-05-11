@@ -133,6 +133,18 @@ def derive_worked_hours(check_in, check_out, fallback=0):
     return diff
 
 
+def is_attendance_exempt_employee(employee):
+    keys = employee.keys() if hasattr(employee, "keys") else employee
+    try:
+        if "attendance_exempt" in keys and int(employee["attendance_exempt"] or 0) == 1:
+            return True
+    except Exception:
+        pass
+    role = safe(employee["attendance_role"] if "attendance_role" in keys else "")
+    role = role.lower().replace("_", " ").replace("-", " ")
+    return role in ("manager", "managerial", "managerial level", "no attendance")
+
+
 def get_header_value(row, aliases):
     for key in aliases:
         if key in row and safe(row.get(key)):
@@ -381,6 +393,7 @@ async def attendance_import(file: UploadFile = File(...)):
     employees = conn.execute(
         """
         SELECT e.*, c.name AS category_name, c.attendance_role, c.shift_start, c.shift_end,
+               COALESCE(c.attendance_exempt, 0) AS attendance_exempt,
                c.expected_daily_hours AS category_daily_hours,
                c.late_grace_minutes, c.early_leave_grace_minutes, c.overtime_after_hours
         FROM employees e
@@ -430,6 +443,12 @@ async def attendance_import(file: UploadFile = File(...)):
             status = "early_leave"
         if late_minutes > 0 and early_leave_minutes > 0:
             status = "late_and_early_leave"
+
+        if is_attendance_exempt_employee(employee):
+            late_minutes = 0.0
+            early_leave_minutes = 0.0
+            overtime_hours = 0.0
+            status = safe(row["status"]) or "present"
 
         exists = conn.execute(
             """

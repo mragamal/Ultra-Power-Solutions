@@ -828,6 +828,19 @@ def attendance_summary_map(conn, period_from, period_to):
     }
 
 
+def is_attendance_exempt_employee(employee):
+    keys = employee.keys() if hasattr(employee, "keys") else employee
+    if "category_attendance_exempt" in keys:
+        try:
+            if int(employee["category_attendance_exempt"] or 0) == 1:
+                return True
+        except Exception:
+            pass
+    role = safe(employee["category_attendance_role"] if "category_attendance_role" in keys else "")
+    role = role.lower().replace("_", " ").replace("-", " ")
+    return role in ("manager", "managerial", "managerial level", "no attendance")
+
+
 def _advance_deduction_note(conn, employee_id: int, payroll_month: int, payroll_year: int, advance_deduction: float):
     due_advances = get_employee_due_advances(conn, employee_id, payroll_month, payroll_year)
     if advance_deduction > 0 and due_advances:
@@ -1056,10 +1069,13 @@ def payroll_create(
         attendance_map = attendance_summary_map(conn, period_from, period_to)
         employees = conn.execute(
             """
-            SELECT *
-            FROM employees
-            WHERE COALESCE(is_active, 1) = 1
-            ORDER BY code, name
+            SELECT e.*,
+                   COALESCE(c.attendance_exempt, 0) AS category_attendance_exempt,
+                   c.attendance_role AS category_attendance_role
+            FROM employees e
+            LEFT JOIN employee_categories c ON c.id = e.category_id
+            WHERE COALESCE(e.is_active, 1) = 1
+            ORDER BY e.code, e.name
             """
         ).fetchall()
 
@@ -1093,6 +1109,12 @@ def payroll_create(
             absent_days = max(basis_days - attendance_days, 0)
             worked_hours = float(att.get("worked_hours", 0))
             overtime_hours = float(att.get("overtime_hours", 0))
+            if is_attendance_exempt_employee(emp):
+                expected_hours = max(float(emp["expected_daily_hours"] or 8), 1)
+                attendance_days = basis_days
+                absent_days = 0.0
+                worked_hours = basis_days * expected_hours
+                overtime_hours = 0.0
 
             fixed_comp = (
                 float(emp["basic_salary"] or 0)

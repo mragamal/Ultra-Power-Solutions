@@ -43,6 +43,7 @@ def ensure_categories_table():
             late_grace_minutes REAL DEFAULT 15,
             early_leave_grace_minutes REAL DEFAULT 15,
             overtime_after_hours REAL DEFAULT 8,
+            attendance_exempt INTEGER DEFAULT 0,
             is_active INTEGER DEFAULT 1,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -59,25 +60,40 @@ def ensure_categories_table():
     ensure_column(conn, "employee_categories", "late_grace_minutes", "ALTER TABLE employee_categories ADD COLUMN late_grace_minutes REAL DEFAULT 15")
     ensure_column(conn, "employee_categories", "early_leave_grace_minutes", "ALTER TABLE employee_categories ADD COLUMN early_leave_grace_minutes REAL DEFAULT 15")
     ensure_column(conn, "employee_categories", "overtime_after_hours", "ALTER TABLE employee_categories ADD COLUMN overtime_after_hours REAL DEFAULT 8")
+    ensure_column(conn, "employee_categories", "attendance_exempt", "ALTER TABLE employee_categories ADD COLUMN attendance_exempt INTEGER DEFAULT 0")
     ensure_column(conn, "employee_categories", "is_active", "ALTER TABLE employee_categories ADD COLUMN is_active INTEGER DEFAULT 1")
     ensure_column(conn, "employee_categories", "created_at", "ALTER TABLE employee_categories ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
 
     seed_rows = [
-        ("CAT-OFF", "Office Staff", "Administration", "office", "08:00", "16:00", 8, 15, 15, 8, 1),
-        ("CAT-FLD", "Field Team", "Operations", "field", "09:00", "17:00", 8, 30, 15, 8, 1),
-        ("CAT-MGT", "Management", "Management", "manager", "08:30", "16:30", 8, 20, 20, 8, 1),
+        ("CAT-OFF", "Office Staff", "Administration", "office", "08:00", "16:00", 8, 15, 15, 8, 0, 1),
+        ("CAT-FLD", "Field Team", "Operations", "field", "09:00", "17:00", 8, 30, 15, 8, 0, 1),
+        ("CAT-MGT", "Managerial Level", "Management", "managerial", "", "", 8, 0, 0, 8, 1, 1),
     ]
     for row in seed_rows:
         conn.execute(
             """
             INSERT OR IGNORE INTO employee_categories (
                 code, name, department_name, attendance_role, shift_start, shift_end,
-                expected_daily_hours, late_grace_minutes, early_leave_grace_minutes, overtime_after_hours, is_active
+                expected_daily_hours, late_grace_minutes, early_leave_grace_minutes, overtime_after_hours, attendance_exempt, is_active
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             row,
         )
+    conn.execute(
+        """
+        UPDATE employee_categories
+        SET attendance_exempt = 1,
+            name = CASE WHEN UPPER(COALESCE(code, '')) = 'CAT-MGT' THEN 'Managerial Level' ELSE name END,
+            attendance_role = CASE WHEN UPPER(COALESCE(code, '')) = 'CAT-MGT' THEN 'managerial' ELSE attendance_role END,
+            shift_start = CASE WHEN UPPER(COALESCE(code, '')) = 'CAT-MGT' THEN '' ELSE shift_start END,
+            shift_end = CASE WHEN UPPER(COALESCE(code, '')) = 'CAT-MGT' THEN '' ELSE shift_end END,
+            late_grace_minutes = CASE WHEN UPPER(COALESCE(code, '')) = 'CAT-MGT' THEN 0 ELSE late_grace_minutes END,
+            early_leave_grace_minutes = CASE WHEN UPPER(COALESCE(code, '')) = 'CAT-MGT' THEN 0 ELSE early_leave_grace_minutes END
+        WHERE UPPER(COALESCE(code, '')) IN ('CAT-MGT', 'MGT', 'MANAGERIAL')
+           OR LOWER(COALESCE(attendance_role, '')) IN ('manager', 'managerial', 'managerial level', 'managerial_level')
+        """
+    )
 
     conn.commit()
     conn.close()
@@ -109,6 +125,8 @@ def category_form_html(action, data=None):
     data = data or {}
     active_yes = "selected" if str(data.get("is_active", "1")) == "1" else ""
     active_no = "selected" if str(data.get("is_active", "1")) != "1" else ""
+    exempt_yes = "selected" if str(data.get("attendance_exempt", "0")) == "1" else ""
+    exempt_no = "selected" if str(data.get("attendance_exempt", "0")) != "1" else ""
     return f"""
     <div class="card">
         <h2>{'Edit Category' if '/edit' in action else 'New Category'}</h2>
@@ -133,6 +151,17 @@ def category_form_html(action, data=None):
                     <label>Attendance Role</label>
                     <input name="attendance_role" value="{escape(safe(data.get('attendance_role')))}" placeholder="office / manager / field / shift-a">
                 </div>
+            </div>
+
+            <div class="row" style="margin-top:14px;">
+                <div class="col">
+                    <label>Attendance Schedule</label>
+                    <select name="attendance_exempt">
+                        <option value="0" {exempt_no}>Required</option>
+                        <option value="1" {exempt_yes}>No Attendance Schedule</option>
+                    </select>
+                </div>
+                <div class="col"></div>
             </div>
 
             <div class="row" style="margin-top:14px;">
@@ -203,6 +232,7 @@ def categories_list(request: Request):
             <td>{escape(safe(row['name']))}</td>
             <td>{escape(safe(row['department_name']))}</td>
             <td>{escape(safe(row['attendance_role']))}</td>
+            <td>{'No Schedule' if int(row['attendance_exempt'] or 0) == 1 else 'Required'}</td>
             <td>{escape(safe(row['shift_start']))}</td>
             <td>{escape(safe(row['shift_end']))}</td>
             <td>{float(row['expected_daily_hours'] or 0):,.2f}</td>
@@ -213,7 +243,7 @@ def categories_list(request: Request):
         </tr>
         """
     if not body:
-        body = "<tr><td colspan='11' style='text-align:center;'>No categories found.</td></tr>"
+        body = "<tr><td colspan='12' style='text-align:center;'>No categories found.</td></tr>"
 
     html = f"""
     <div class="card">
@@ -232,6 +262,7 @@ def categories_list(request: Request):
                     <th>Name</th>
                     <th>Department</th>
                     <th>Attendance Role</th>
+                    <th>Schedule</th>
                     <th>Shift Start</th>
                     <th>Shift End</th>
                     <th>Daily Hours</th>
@@ -265,6 +296,7 @@ def category_create(
     late_grace_minutes: str = Form("15"),
     early_leave_grace_minutes: str = Form("15"),
     overtime_after_hours: str = Form("8"),
+    attendance_exempt: int = Form(0),
     is_active: int = Form(1),
 ):
     conn = get_conn()
@@ -272,9 +304,9 @@ def category_create(
         """
         INSERT INTO employee_categories (
             code, name, department_name, attendance_role, shift_start, shift_end,
-            expected_daily_hours, late_grace_minutes, early_leave_grace_minutes, overtime_after_hours, is_active
+            expected_daily_hours, late_grace_minutes, early_leave_grace_minutes, overtime_after_hours, attendance_exempt, is_active
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             safe(code),
@@ -287,6 +319,7 @@ def category_create(
             to_float(late_grace_minutes, 15),
             to_float(early_leave_grace_minutes, 15),
             to_float(overtime_after_hours, 8),
+            int(attendance_exempt or 0),
             int(is_active or 0),
         ),
     )
@@ -318,6 +351,7 @@ def category_update(
     late_grace_minutes: str = Form("15"),
     early_leave_grace_minutes: str = Form("15"),
     overtime_after_hours: str = Form("8"),
+    attendance_exempt: int = Form(0),
     is_active: int = Form(1),
 ):
     conn = get_conn()
@@ -325,7 +359,7 @@ def category_update(
         """
         UPDATE employee_categories
         SET code = ?, name = ?, department_name = ?, attendance_role = ?, shift_start = ?, shift_end = ?,
-            expected_daily_hours = ?, late_grace_minutes = ?, early_leave_grace_minutes = ?, overtime_after_hours = ?, is_active = ?
+            expected_daily_hours = ?, late_grace_minutes = ?, early_leave_grace_minutes = ?, overtime_after_hours = ?, attendance_exempt = ?, is_active = ?
         WHERE id = ?
         """,
         (
@@ -339,6 +373,7 @@ def category_update(
             to_float(late_grace_minutes, 15),
             to_float(early_leave_grace_minutes, 15),
             to_float(overtime_after_hours, 8),
+            int(attendance_exempt or 0),
             int(is_active or 0),
             category_id,
         ),
