@@ -2161,6 +2161,7 @@ def hr_adjustment_list_page(request, kind):
             status_cls = "green" if status.lower() == "applied" else "orange"
             actions = f'<a class="btn blue" href="{base_path}/{row["id"]}">Open</a>'
             if status.lower() in ("draft", "open"):
+                actions += f' <a class="btn gray" href="{base_path}/{row["id"]}/edit">Edit</a>'
                 actions += f"""
                     <form method="post" action="{base_path}/{row['id']}/delete" style="display:inline;"
                           onsubmit="return confirm('Delete this draft record?');">
@@ -2254,6 +2255,75 @@ def hr_adjustment_new_page(request, kind, error=""):
         conn.close()
 
 
+def hr_adjustment_edit_page(request, kind, record_id, error=""):
+    ensure_payroll_tables()
+    is_reward = kind == "reward"
+    table = "employee_rewards" if is_reward else "employee_penalties"
+    no_col = "reward_no" if is_reward else "penalty_no"
+    date_col = "reward_date" if is_reward else "penalty_date"
+    base_path = "/ui/hr/employee-rewards" if is_reward else "/ui/hr/employee-penalties"
+    title = "Edit Employee Reward" if is_reward else "Edit Employee Penalty"
+    conn = get_conn()
+    try:
+        row = conn.execute(f"SELECT * FROM {table} WHERE id = ? LIMIT 1", (record_id,)).fetchone()
+        if not row:
+            return HTMLResponse("Record not found", status_code=404)
+        if safe(row["status"]).lower() not in ("draft", "open"):
+            return RedirectResponse(
+                f"{base_path}/{record_id}?msg=" + quote("Only draft records can be edited."),
+                status_code=302,
+            )
+        error_html = f'<div class="msg error">{escape(error)}</div>' if error else ""
+        attachments_html = attachment_gallery(
+            [{"file_url": row["attachment_url"], "file_name": row["attachment_name"]}]
+        )
+        html = f"""
+        <div class="card">
+            {error_html}
+            <h2>{title}</h2>
+            <form method="post" action="{base_path}/{record_id}/edit" enctype="multipart/form-data">
+                <div class="row">
+                    <div class="col">
+                        <label>No</label>
+                        <input name="doc_no" value="{escape(safe(row[no_col]))}" readonly>
+                    </div>
+                    <div class="col">
+                        <label>Date</label>
+                        <input type="date" name="doc_date" value="{escape(safe(row[date_col]))}" required>
+                    </div>
+                    <div class="col">
+                        <label>Employee</label>
+                        <select name="employee_id" required>{employee_select_options(conn, row["employee_id"])}</select>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col">
+                        <label>Amount</label>
+                        <input type="number" step="0.01" min="0.01" name="amount" value="{float(row['amount'] or 0)}" required>
+                    </div>
+                    <div class="col">
+                        <label>Attachment</label>
+                        <input type="file" name="invoice_attachments" accept=".pdf,image/*">
+                    </div>
+                </div>
+                <label>Reason</label>
+                <input name="reason" value="{escape(safe(row['reason']))}">
+                <div style="margin-top:16px;">
+                    <button class="btn green" type="submit">Save</button>
+                    <a class="btn gray" href="{base_path}/{record_id}">Back</a>
+                </div>
+            </form>
+        </div>
+        <div class="card">
+            <h3>Current Attachment</h3>
+            {attachments_html}
+        </div>
+        """
+        return HTMLResponse(render_page(title, html, "en", current_path=request.url.path))
+    finally:
+        conn.close()
+
+
 async def hr_adjustment_create(request, kind):
     ensure_payroll_tables()
     is_reward = kind == "reward"
@@ -2294,6 +2364,59 @@ async def hr_adjustment_create(request, kind):
         conn.close()
 
 
+async def hr_adjustment_update(request, kind, record_id):
+    ensure_payroll_tables()
+    is_reward = kind == "reward"
+    table = "employee_rewards" if is_reward else "employee_penalties"
+    date_col = "reward_date" if is_reward else "penalty_date"
+    base_path = "/ui/hr/employee-rewards" if is_reward else "/ui/hr/employee-penalties"
+    form = await request.form()
+    attachments = await attachments_from_form(form)
+    doc_date = safe(form.get("doc_date")) or date.today().isoformat()
+    employee_id = int(to_float(form.get("employee_id")))
+    amount = to_float(form.get("amount"))
+    reason = safe(form.get("reason"))
+    if not employee_id or amount <= 0:
+        return hr_adjustment_edit_page(request, kind, record_id, "Employee and amount are required.")
+    conn = get_conn()
+    try:
+        row = conn.execute(f"SELECT * FROM {table} WHERE id = ? LIMIT 1", (record_id,)).fetchone()
+        if not row:
+            return HTMLResponse("Record not found", status_code=404)
+        if safe(row["status"]).lower() not in ("draft", "open"):
+            return RedirectResponse(
+                f"{base_path}/{record_id}?msg=" + quote("Only draft records can be edited."),
+                status_code=302,
+            )
+        attachment_url = safe(row["attachment_url"])
+        attachment_name = safe(row["attachment_name"])
+        if attachments:
+            attachment_url = attachments[0]["file_url"]
+            attachment_name = attachments[0]["file_name"]
+        if not attachment_url:
+            return hr_adjustment_edit_page(request, kind, record_id, "Attachment is required.")
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET {date_col} = ?,
+                employee_id = ?,
+                amount = ?,
+                reason = ?,
+                attachment_url = ?,
+                attachment_name = ?
+            WHERE id = ?
+            """,
+            (doc_date, employee_id, amount, reason, attachment_url, attachment_name, record_id),
+        )
+        conn.commit()
+        return RedirectResponse(f"{base_path}/{record_id}?msg=" + quote("Updated."), status_code=302)
+    except Exception as e:
+        conn.rollback()
+        return HTMLResponse(f"Update error: {escape(str(e))}", status_code=400)
+    finally:
+        conn.close()
+
+
 def hr_adjustment_open_page(request, kind, record_id):
     ensure_payroll_tables()
     is_reward = kind == "reward"
@@ -2321,6 +2444,7 @@ def hr_adjustment_open_page(request, kind, record_id):
         actions = ""
         if safe(row["status"]).lower() in ("draft", "open"):
             actions = f"""
+                <a class="btn gray" href="{base_path}/{record_id}/edit">Edit</a>
                 <form method="post" action="{base_path}/{record_id}/delete" style="display:inline;"
                       onsubmit="return confirm('Delete this draft record?');">
                     <button class="btn red" type="submit">Delete</button>
@@ -2392,6 +2516,16 @@ async def employee_reward_create(request: Request):
     return await hr_adjustment_create(request, "reward")
 
 
+@router.get("/ui/hr/employee-rewards/{record_id}/edit", response_class=HTMLResponse)
+def employee_reward_edit(request: Request, record_id: int):
+    return hr_adjustment_edit_page(request, "reward", record_id)
+
+
+@router.post("/ui/hr/employee-rewards/{record_id}/edit")
+async def employee_reward_update(request: Request, record_id: int):
+    return await hr_adjustment_update(request, "reward", record_id)
+
+
 @router.get("/ui/hr/employee-rewards/{record_id}", response_class=HTMLResponse)
 def employee_reward_open(request: Request, record_id: int):
     return hr_adjustment_open_page(request, "reward", record_id)
@@ -2415,6 +2549,16 @@ def employee_penalty_new(request: Request):
 @router.post("/ui/hr/employee-penalties/new")
 async def employee_penalty_create(request: Request):
     return await hr_adjustment_create(request, "penalty")
+
+
+@router.get("/ui/hr/employee-penalties/{record_id}/edit", response_class=HTMLResponse)
+def employee_penalty_edit(request: Request, record_id: int):
+    return hr_adjustment_edit_page(request, "penalty", record_id)
+
+
+@router.post("/ui/hr/employee-penalties/{record_id}/edit")
+async def employee_penalty_update(request: Request, record_id: int):
+    return await hr_adjustment_update(request, "penalty", record_id)
 
 
 @router.get("/ui/hr/employee-penalties/{record_id}", response_class=HTMLResponse)
