@@ -22,6 +22,27 @@ MODULE_CATALOG = [
     ("system", "System"),
 ]
 
+ACCOUNTING_PERMISSION_CATALOG = [
+    ("accounting.accounts", "Accounting / Chart of Accounts"),
+    ("accounting.journal", "Accounting / Journal"),
+    ("accounting.customers", "Accounting / Customers"),
+    ("accounting.customer_invoices", "Accounting / Customer Invoices"),
+    ("accounting.cash_receipts", "Accounting / Cash Receipts"),
+    ("accounting.vendors", "Accounting / Vendors"),
+    ("accounting.vendor_bills", "Accounting / Vendor Bills"),
+    ("accounting.vendor_payments", "Accounting / Vendor Payments"),
+    ("accounting.cash_payments", "Accounting / Cash Payments"),
+    ("accounting.expenses", "Accounting / Expenses"),
+    ("accounting.petty_cash", "Accounting / Petty Cash"),
+    ("accounting.employee_advances", "Accounting / Employee Advances"),
+    ("accounting.cost_centers", "Accounting / Cost Centers"),
+    ("accounting.settings", "Accounting / Settings"),
+]
+
+PERMISSION_CATALOG = MODULE_CATALOG + ACCOUNTING_PERMISSION_CATALOG
+
+ACCOUNTING_PERMISSION_CODES = [code for code, _ in ACCOUNTING_PERMISSION_CATALOG]
+
 
 def hash_password(password: str) -> str:
     password = (password or "").encode("utf-8")
@@ -118,7 +139,7 @@ def ensure_auth_tables():
         """, (code, name))
 
     # admin permissions
-    for m, _ in MODULE_CATALOG:
+    for m, _ in PERMISSION_CATALOG:
         conn.execute("""
             INSERT OR IGNORE INTO role_permissions (
                 role_code, module_code, can_view, can_create, can_edit,
@@ -157,6 +178,16 @@ def ensure_auth_tables():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, row)
 
+    accounting_default = ("accounting", 1, 1, 1, 0, 1, 1)
+    for module_code in ACCOUNTING_PERMISSION_CODES:
+        conn.execute("""
+            INSERT OR IGNORE INTO role_permissions (
+                role_code, module_code, can_view, can_create, can_edit,
+                can_delete, can_approve, can_post
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (accounting_default[0], module_code, *accounting_default[1:]))
+
     # default admin user
     admin_exists = conn.execute("""
         SELECT id FROM users WHERE username = 'admin' LIMIT 1
@@ -173,7 +204,7 @@ def ensure_auth_tables():
             "admin",
         ))
         admin_id = conn.execute("SELECT id FROM users WHERE username = 'admin' LIMIT 1").fetchone()["id"]
-        for module_code, _ in MODULE_CATALOG:
+        for module_code, _ in PERMISSION_CATALOG:
             conn.execute("""
                 INSERT OR IGNORE INTO user_permissions (
                     user_id, module_code, can_view, can_create, can_edit,
@@ -183,6 +214,33 @@ def ensure_auth_tables():
             """, (admin_id, module_code))
 
     user_rows = conn.execute("SELECT id, role_code FROM users").fetchall()
+    for user_row in user_rows:
+        broad_accounting = conn.execute("""
+            SELECT *
+            FROM user_permissions
+            WHERE user_id = ? AND module_code = 'accounting'
+            LIMIT 1
+        """, (user_row["id"],)).fetchone()
+        if not broad_accounting:
+            continue
+        for module_code in ACCOUNTING_PERMISSION_CODES:
+            conn.execute("""
+                INSERT OR IGNORE INTO user_permissions (
+                    user_id, module_code, can_view, can_create, can_edit,
+                    can_delete, can_approve, can_post
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_row["id"],
+                module_code,
+                int(broad_accounting["can_view"] or 0),
+                int(broad_accounting["can_create"] or 0),
+                int(broad_accounting["can_edit"] or 0),
+                int(broad_accounting["can_delete"] or 0),
+                int(broad_accounting["can_approve"] or 0),
+                int(broad_accounting["can_post"] or 0),
+            ))
+
     for user_row in user_rows:
         role_rows = conn.execute("""
             SELECT *
@@ -235,7 +293,7 @@ def permission_row_to_dict(row):
 
 
 def get_module_catalog():
-    return MODULE_CATALOG[:]
+    return PERMISSION_CATALOG[:]
 
 
 def get_role_permissions(role_code: str):
