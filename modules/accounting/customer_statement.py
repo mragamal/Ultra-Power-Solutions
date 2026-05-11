@@ -6,8 +6,6 @@ from fastapi.responses import HTMLResponse
 from db import get_conn
 from layout import render_page
 from i18n import get_lang
-from modules.accounting.partner_ledger import get_partner_account_code
-
 router = APIRouter()
 
 
@@ -135,33 +133,15 @@ def get_customer_name(conn, customer_id):
 # =========================================================
 # OPENING / MOVEMENTS FROM POSTED JOURNAL ONLY
 # =========================================================
-def get_customer_partner_account_code(conn, customer_id):
-    return safe(get_partner_account_code(conn, "customer", str(customer_id)))
-
-
 def customer_journal_match_sql():
-    # Older invoice journals may have been posted before partner_id was stored
-    # on the receivable line. The statement still reads posted journal lines
-    # only, but can infer the customer from the invoice linked to that journal.
     return """
-      AND COALESCE(l.account_code,'') = ?
-      AND (
-            (
-                COALESCE(l.partner_id, 0) = ?
-                AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM customer_invoices ci
-                WHERE ci.journal_id = j.id
-                  AND COALESCE(ci.customer_id, 0) = ?
-            )
-      )
+      AND COALESCE(l.partner_id, 0) = ?
+      AND LOWER(COALESCE(l.partner_type,'')) = 'customer'
       AND LOWER(COALESCE(j.status,'')) = 'posted'
     """
 
 
-def get_opening_journal_balance(conn, customer_id, account_code, date_from):
+def get_opening_journal_balance(conn, customer_id, date_from):
     if not date_from:
         return Decimal("0.00")
     row = conn.execute(f"""
@@ -173,11 +153,11 @@ def get_opening_journal_balance(conn, customer_id, account_code, date_from):
         WHERE 1 = 1
         {customer_journal_match_sql()}
           AND COALESCE(j.entry_date,'') < ?
-    """, (account_code, customer_id, customer_id, date_from)).fetchone()
+    """, (customer_id, date_from)).fetchone()
     return q2(D(row["total_debit"] if row else 0) - D(row["total_credit"] if row else 0))
 
 
-def get_journal_statement_rows(conn, customer_id, account_code, date_from="", date_to=""):
+def get_journal_statement_rows(conn, customer_id, date_from="", date_to=""):
     sql = f"""
         SELECT
             j.id AS journal_id,
@@ -196,7 +176,7 @@ def get_journal_statement_rows(conn, customer_id, account_code, date_from="", da
         WHERE 1 = 1
         {customer_journal_match_sql()}
     """
-    params = [account_code, customer_id, customer_id]
+    params = [customer_id]
 
     if safe(date_from):
         sql += " AND COALESCE(j.entry_date,'') >= ?"
@@ -210,10 +190,10 @@ def get_journal_statement_rows(conn, customer_id, account_code, date_from="", da
     return conn.execute(sql, params).fetchall()
 
 
-def build_statement_rows(conn, customer_id, account_code, date_from="", date_to=""):
+def build_statement_rows(conn, customer_id, date_from="", date_to=""):
     rows = []
 
-    for r in get_journal_statement_rows(conn, customer_id, account_code, date_from, date_to):
+    for r in get_journal_statement_rows(conn, customer_id, date_from, date_to):
         ref_text = safe(r["reference"])
         status_text = safe(r["status"]) or "draft"
         source_type = safe(r["source_type"]).lower()
@@ -235,59 +215,6 @@ def build_statement_rows(conn, customer_id, account_code, date_from="", date_to=
 
     rows.sort(key=lambda x: (x["trx_date"], x["trx_type"], x["ref_no"]))
     return rows
-
-
-# =========================================================
-# AGING SNAPSHOT
-# =========================================================
-def get_posted_allocated_amount_for_invoice(conn, invoice_id):
-    row = conn.execute("""
-        SELECT COALESCE(SUM(a.allocated_amount), 0) AS total_allocated
-        FROM customer_payment_allocations a
-        JOIN customer_payments p ON p.id = a.payment_id
-        WHERE a.invoice_id = ?
-          AND LOWER(COALESCE(p.status,'')) = 'posted'
-    """, (invoice_id,)).fetchone()
-
-    return q2(row["total_allocated"] if row else 0)
-
-
-def get_open_invoices_snapshot(conn, customer_id):
-    rows = conn.execute("""
-        SELECT *
-        FROM customer_invoices
-        WHERE customer_id = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-        ORDER BY invoice_date, id
-    """, (customer_id,)).fetchall()
-
-    snapshot_html = ""
-    total_open = Decimal("0.00")
-
-    for r in rows:
-        allocated = get_posted_allocated_amount_for_invoice(conn, r["id"])
-        open_amt = q2(q2(r["net_amount"]) - allocated)
-        if open_amt <= Decimal("0.00"):
-            continue
-
-        total_open += open_amt
-
-        snapshot_html += f"""
-        <tr>
-            <td>{safe(r['invoice_no'])}</td>
-            <td>{safe(r['invoice_date'])}</td>
-            <td>{safe(r['due_date'])}</td>
-            <td>{money(r['net_amount'])}</td>
-            <td>{money(allocated)}</td>
-            <td>{money(open_amt)}</td>
-            <td>{safe(r['payment_status'])}</td>
-        </tr>
-        """
-
-    if not snapshot_html:
-        snapshot_html = "<tr><td colspan='7' style='text-align:center;'>No open invoices.</td></tr>"
-
-    return snapshot_html, total_open
 
 
 # =========================================================
@@ -353,14 +280,9 @@ def customer_statement(
         conn.close()
         return HTMLResponse("Customer not found.", status_code=404)
 
-    customer_account_code = get_customer_partner_account_code(conn, customer_id_int)
-    if not customer_account_code:
-        conn.close()
-        return HTMLResponse("Customer account is missing.", status_code=400)
+    opening_balance = q2(get_opening_journal_balance(conn, customer_id_int, date_from))
 
-    opening_balance = q2(get_opening_journal_balance(conn, customer_id_int, customer_account_code, date_from))
-
-    rows = build_statement_rows(conn, customer_id_int, customer_account_code, date_from, date_to)
+    rows = build_statement_rows(conn, customer_id_int, date_from, date_to)
 
     body = ""
     running = opening_balance
@@ -454,40 +376,12 @@ def customer_statement(
     </div>
     """
 
-    open_snapshot_html, total_open = get_open_invoices_snapshot(conn, customer_id_int)
-
-    open_invoices_html = f"""
-    <div class="card">
-        <div class="toolbar">
-            <h3 class="sub-title" style="margin:0;">Open Invoices Snapshot</h3>
-            <div><b>Total Open:</b> {money(total_open)}</div>
-        </div>
-
-        <table style="margin-top:12px;">
-            <thead>
-                <tr>
-                    <th>Invoice #</th>
-                    <th>Invoice Date</th>
-                    <th>Due Date</th>
-                    <th>Net Amount</th>
-                    <th>Allocated</th>
-                    <th>Open Amount</th>
-                    <th>Payment Status</th>
-                </tr>
-            </thead>
-            <tbody>
-                {open_snapshot_html}
-            </tbody>
-        </table>
-    </div>
-    """
-
     conn.close()
 
     return HTMLResponse(
         render_page(
             "Customer Statement",
-            filter_html + summary_html + statement_html + open_invoices_html,
+            filter_html + summary_html + statement_html,
             lang,
             current_path=request.url.path
         )

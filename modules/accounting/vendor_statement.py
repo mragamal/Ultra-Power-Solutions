@@ -5,12 +5,6 @@ from fastapi.responses import HTMLResponse
 
 from db import get_conn
 from layout import render_page
-from modules.accounting.partner_ledger import get_partner_account_code, get_opening_balance as get_partner_opening_balance
-from modules.accounting.allocation_engine import (
-    get_allocated_total_for_document,
-    get_allocated_total_for_payment,
-    get_vendor_payment_unapplied_amount,
-)
 
 router = APIRouter()
 
@@ -83,44 +77,23 @@ def get_vendor_row(conn, vendor_id: int):
 # =========================================================
 # DATA BUILDERS
 # =========================================================
-def get_vendor_partner_account_code(conn, vendor_id: int):
-    return safe(get_partner_account_code(conn, "vendor", str(vendor_id)))
-
-
 def get_vendor_opening_journal_balance(conn, vendor_id: int, date_from: str = ""):
-    partner_account_code = get_vendor_partner_account_code(conn, vendor_id)
-    if not date_from or not partner_account_code:
-        return Decimal("0.00")
-    opening = Decimal(str(get_partner_opening_balance(conn, "vendor", str(vendor_id), partner_account_code, date_from) or 0))
-    return (-opening).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
-
-
-def get_opening_vendor_bill_balance(conn, vendor_id: int, date_from: str = ""):
     if not date_from:
         return Decimal("0.00")
     row = conn.execute("""
-        SELECT COALESCE(SUM(net_amount), 0) AS total_amt
-        FROM vendor_bills
-        WHERE vendor_id = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-          AND COALESCE(bill_date,'') < ?
+        SELECT
+            COALESCE(SUM(l.debit), 0) AS total_debit,
+            COALESCE(SUM(l.credit), 0) AS total_credit
+        FROM journal_lines l
+        JOIN journal_entries j ON j.id = l.journal_id
+        WHERE LOWER(COALESCE(j.status,'')) = 'posted'
+          AND LOWER(COALESCE(l.partner_type,'')) = 'vendor'
+          AND COALESCE(l.partner_id, 0) = ?
+          AND COALESCE(j.entry_date,'') < ?
     """, (vendor_id, date_from)).fetchone()
-    return Decimal(str(row["total_amt"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
-
-
-def get_opening_vendor_payment_balance(conn, vendor_id: int, date_from: str = ""):
-    if not date_from:
-        return Decimal("0.00")
-    row = conn.execute("""
-        SELECT COALESCE(SUM(amount), 0) AS total_amt
-        FROM cash_vouchers
-        WHERE LOWER(COALESCE(voucher_type,'')) = 'payment'
-          AND LOWER(COALESCE(party_type,'')) = 'vendor'
-          AND COALESCE(party_id, 0) = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-          AND COALESCE(voucher_date,'') < ?
-    """, (vendor_id, date_from)).fetchone()
-    return Decimal(str(row["total_amt"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
+    total_credit = Decimal(str(row["total_credit"] if row else 0))
+    total_debit = Decimal(str(row["total_debit"] if row else 0))
+    return (total_credit - total_debit).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
 
 
 def get_vendor_statement_rows(conn, vendor_id: int, date_from: str = "", date_to: str = ""):
@@ -130,50 +103,47 @@ def get_vendor_statement_rows(conn, vendor_id: int, date_from: str = "", date_to
 
     rows = []
 
-    partner_account_code = get_vendor_partner_account_code(conn, vendor_id)
-    if partner_account_code:
-        sql = """
-            SELECT
-                j.id AS journal_id,
-                j.entry_date AS trx_date,
-                j.entry_no AS doc_no,
-                j.reference,
-                COALESCE(NULLIF(l.line_description, ''), NULLIF(j.description, ''), '') AS description,
-                COALESCE(l.debit, 0) AS debit,
-                COALESCE(l.credit, 0) AS credit
-            FROM journal_lines l
-            JOIN journal_entries j ON j.id = l.journal_id
-            WHERE LOWER(COALESCE(j.status,'')) = 'posted'
-              AND COALESCE(l.partner_id, 0) = ?
-              AND LOWER(COALESCE(l.partner_type,'')) = 'vendor'
-              AND COALESCE(l.account_code,'') = ?
-        """
-        params = [vendor_id, partner_account_code]
-        if date_from:
-            sql += " AND COALESCE(j.entry_date, '') >= ?"
-            params.append(date_from)
-        if date_to:
-            sql += " AND COALESCE(j.entry_date, '') <= ?"
-            params.append(date_to)
-        sql += " ORDER BY j.entry_date, j.id, COALESCE(l.line_no,0), l.id"
-        journal_rows = conn.execute(sql, params).fetchall()
+    sql = """
+        SELECT
+            j.id AS journal_id,
+            j.entry_date AS trx_date,
+            j.entry_no AS doc_no,
+            j.reference,
+            COALESCE(NULLIF(l.line_description, ''), NULLIF(j.description, ''), '') AS description,
+            COALESCE(l.debit, 0) AS debit,
+            COALESCE(l.credit, 0) AS credit
+        FROM journal_lines l
+        JOIN journal_entries j ON j.id = l.journal_id
+        WHERE LOWER(COALESCE(j.status,'')) = 'posted'
+          AND LOWER(COALESCE(l.partner_type,'')) = 'vendor'
+          AND COALESCE(l.partner_id, 0) = ?
+    """
+    params = [vendor_id]
+    if date_from:
+        sql += " AND COALESCE(j.entry_date, '') >= ?"
+        params.append(date_from)
+    if date_to:
+        sql += " AND COALESCE(j.entry_date, '') <= ?"
+        params.append(date_to)
+    sql += " ORDER BY j.entry_date, j.id, COALESCE(l.line_no,0), l.id"
+    journal_rows = conn.execute(sql, params).fetchall()
 
-        for r in journal_rows:
-            rows.append({
-                "trx_date": safe(r["trx_date"]),
-                "doc_type": "Journal",
-                "doc_no": safe(r["doc_no"]),
-                "due_date": "",
-                "description": safe(r["description"]) or f"Journal {safe(r['reference']) or safe(r['doc_no'])}",
-                "debit": Decimal(str(r["debit"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP),
-                "credit": Decimal(str(r["credit"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP),
-                "allocated": Decimal("0.00"),
-                "open_amount": Decimal("0.00"),
-                "unapplied": Decimal("0.00"),
-                "journal_id": safe_int(r["journal_id"]),
-                "reference": safe(r["reference"]),
-                "sort_key": (safe(r["trx_date"]), 1, safe(r["doc_no"]), str(safe_int(r["journal_id"]))),
-            })
+    for r in journal_rows:
+        rows.append({
+            "trx_date": safe(r["trx_date"]),
+            "doc_type": "Journal",
+            "doc_no": safe(r["doc_no"]),
+            "due_date": "",
+            "description": safe(r["description"]) or f"Journal {safe(r['reference']) or safe(r['doc_no'])}",
+            "debit": Decimal(str(r["debit"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP),
+            "credit": Decimal(str(r["credit"] or 0)).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP),
+            "allocated": Decimal("0.00"),
+            "open_amount": Decimal("0.00"),
+            "unapplied": Decimal("0.00"),
+            "journal_id": safe_int(r["journal_id"]),
+            "reference": safe(r["reference"]),
+            "sort_key": (safe(r["trx_date"]), 1, safe(r["doc_no"]), str(safe_int(r["journal_id"]))),
+        })
 
     rows.sort(key=lambda x: x["sort_key"])
 
