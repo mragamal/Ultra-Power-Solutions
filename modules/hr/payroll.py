@@ -468,6 +468,49 @@ def clear_payroll_hr_adjustments(conn, run_id):
     )
 
 
+def close_payroll_hr_adjustments(conn, run_id):
+    conn.execute(
+        """
+        UPDATE employee_rewards
+        SET status = 'closed'
+        WHERE payroll_run_id = ?
+          AND LOWER(COALESCE(status, '')) IN ('applied', 'posted', 'open')
+        """,
+        (run_id,),
+    )
+    conn.execute(
+        """
+        UPDATE employee_penalties
+        SET status = 'closed'
+        WHERE payroll_run_id = ?
+          AND LOWER(COALESCE(status, '')) IN ('applied', 'posted', 'open')
+        """,
+        (run_id,),
+    )
+
+
+def sync_final_posted_payrolls(conn, run_id=None):
+    params = []
+    run_filter = ""
+    if run_id is not None:
+        run_filter = "AND pr.id = ?"
+        params.append(run_id)
+    rows = conn.execute(
+        f"""
+        SELECT pr.id
+        FROM payroll_runs pr
+        JOIN journal_entries je ON je.id = pr.payroll_journal_id
+        WHERE LOWER(COALESCE(je.status, '')) = 'posted'
+          {run_filter}
+        """,
+        params,
+    ).fetchall()
+    for row in rows:
+        close_payroll_hr_adjustments(conn, row["id"])
+        conn.execute("UPDATE payroll_runs SET status = 'posted' WHERE id = ?", (row["id"],))
+    return len(rows)
+
+
 def grant_base_amount(emp, salary_base):
     basic = float(emp["basic_salary"] or 0)
     fixed = (
@@ -898,6 +941,8 @@ ensure_payroll_tables()
 def payroll_list(request: Request):
     conn = get_conn()
     try:
+        if sync_final_posted_payrolls(conn):
+            conn.commit()
         rows = conn.execute(
             """
             SELECT pr.*,
@@ -1210,6 +1255,9 @@ def payroll_open(request: Request, run_id: int):
         run = conn.execute("SELECT * FROM payroll_runs WHERE id = ? LIMIT 1", (run_id,)).fetchone()
         if not run:
             return HTMLResponse("Payroll run not found", status_code=404)
+        if sync_final_posted_payrolls(conn, run_id):
+            conn.commit()
+            run = conn.execute("SELECT * FROM payroll_runs WHERE id = ? LIMIT 1", (run_id,)).fetchone()
 
         lines = conn.execute(
             """
@@ -2145,11 +2193,14 @@ def hr_adjustment_list_page(request, kind):
     title = "Employee Rewards" if is_reward else "Employee Penalties"
     conn = get_conn()
     try:
+        if sync_final_posted_payrolls(conn):
+            conn.commit()
         rows = conn.execute(
             f"""
             SELECT a.*, e.code AS employee_code, e.name AS employee_name
             FROM {table} a
             LEFT JOIN employees e ON e.id = a.employee_id
+            WHERE LOWER(COALESCE(a.status, 'draft')) <> 'closed'
             ORDER BY a.id DESC
             """
         ).fetchall()
