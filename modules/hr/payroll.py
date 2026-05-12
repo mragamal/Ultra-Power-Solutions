@@ -765,11 +765,17 @@ def find_chrome_exe():
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+        "/usr/bin/microsoft-edge",
     ]
     for item in candidates:
         if item and os.path.exists(item):
             return item
-    for name in ("chrome.exe", "msedge.exe"):
+    for name in ("chrome.exe", "msedge.exe", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"):
         found = shutil.which(name)
         if found:
             return found
@@ -1928,7 +1934,10 @@ def payroll_payslips_download(request: Request, run_id: int, line_id: list[int] 
                     f"--print-to-pdf={pdf_path}",
                     html_path.as_uri(),
                 ]
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+                result = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace").strip()
+                    raise Exception(f"PDF export failed for {employee_name}: {err[:500] or 'browser returned an error'}")
                 if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
                     raise Exception(f"PDF was not created for {employee_name}")
                 pdf_files.append(pdf_path)
