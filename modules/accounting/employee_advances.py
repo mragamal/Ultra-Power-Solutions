@@ -64,6 +64,57 @@ def can_edit_or_delete_advance(row) -> bool:
     return safe(row.get("status")).lower() in ("active", "open")
 
 
+def advance_row_get(row, key, default=None):
+    if not row:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def advance_has_posted_journal(conn, row) -> bool:
+    journal_line_id = safe(advance_row_get(row, "journal_line_id")).strip()
+    if not journal_line_id:
+        return False
+
+    linked = conn.execute(
+        """
+        SELECT j.status
+        FROM journal_lines jl
+        JOIN journal_entries j ON j.id = jl.journal_id
+        WHERE jl.id = ?
+        LIMIT 1
+        """,
+        (journal_line_id,),
+    ).fetchone()
+    if linked:
+        return safe(linked["status"]).lower() == "posted"
+
+    return True
+
+
+def can_delete_advance(conn, row) -> bool:
+    if not row:
+        return False
+    status = safe(advance_row_get(row, "status")).lower() or "active"
+    if status in ("closed", "cancelled", "paid", "posted", "reversed"):
+        return False
+    if advance_has_posted_journal(conn, row):
+        return False
+
+    advance_id = advance_row_get(row, "id")
+    if not advance_id:
+        return False
+    has_payroll_deduction = conn.execute(
+        "SELECT 1 FROM employee_advance_deductions WHERE advance_id = ? LIMIT 1",
+        (advance_id,),
+    ).fetchone()
+    return has_payroll_deduction is None
+
+
 def can_edit_advance_schedule(row) -> bool:
     if not row:
         return False
@@ -914,22 +965,25 @@ def advances_update(
 @router.post(f"{BASE_ROUTE}/{{advance_id}}/delete")
 def advances_delete(request: Request, advance_id: int):
     conn = get_conn()
-    advance = conn.execute("SELECT status, journal_line_id FROM employee_advances WHERE id = ?", (advance_id,)).fetchone()
-    if not advance or not can_edit_or_delete_advance(dict(advance)):
+    advance = conn.execute("SELECT id, status, journal_line_id FROM employee_advances WHERE id = ?", (advance_id,)).fetchone()
+    if not advance or not can_delete_advance(conn, advance):
         conn.close()
         return HTMLResponse(
             tr(
                 request,
-                "Cannot delete this advance after it is linked to journal or closed/cancelled.",
-                "ظ„ط§ ظٹظ…ظƒظ† ط­ط°ظپ ظ‡ط°ظ‡ ط§ظ„ط³ظ„ظپط© ط¨ط¹ط¯ ط±ط¨ط·ظ‡ط§ ط¨ط§ظ„ظ‚ظٹظˆط¯ ط£ظˆ ط¨ط¹ط¯ ط¥ظ‚ظپط§ظ„ظ‡ط§/ط¥ظ„ط؛ط§ط¦ظ‡ط§.",
+                "Cannot delete this advance after it has posted journal or payroll deductions.",
+                "لا يمكن حذف هذه السلفة بعد وجود قيد مرحل أو خصومات مرتبات عليها.",
             ),
             status_code=400,
         )
 
+    conn.execute("DELETE FROM employee_advance_deferrals WHERE advance_id = ?", (advance_id,))
+    conn.execute("DELETE FROM employee_advance_installments WHERE advance_id = ?", (advance_id,))
+    conn.execute("DELETE FROM employee_advance_deductions WHERE advance_id = ?", (advance_id,))
     conn.execute("DELETE FROM employee_advances WHERE id = ?", (advance_id,))
     conn.commit()
     conn.close()
-    msg = tr(request, "Advance deleted successfully.", "طھظ… ط­ط°ظپ ط§ظ„ط³ظ„ظپط© ط¨ظ†ط¬ط§ط­.")
+    msg = tr(request, "Advance deleted successfully.", "تم حذف السلفة بنجاح.")
     return RedirectResponse(with_lang(request, BASE_ROUTE) + f"?msg={quote(msg)}", status_code=302)
 
 
@@ -973,6 +1027,7 @@ def advances_list(request: Request):
         paid_before_start = float(row["paid_before_start"] or 0)
         balance = max(float(row["amount"] or 0) - paid - paid_before_start, 0)
         displayed_paid = paid + paid_before_start
+        can_delete = can_delete_advance(local_conn, row)
         local_conn.close()
         status_cls = "green" if safe(row["status"]).lower() == "closed" else "orange"
         employee_label = f"{safe(row['employee_code'])} - {safe(row['employee_name'])}" if safe(row["employee_code"]) else (safe(row["employee_name"]) or safe(row["journal_employee_name"]) or f"Employee #{safe(row['employee_id'])}")
@@ -997,6 +1052,7 @@ def advances_list(request: Request):
                 <a class="btn orange" href="{with_lang(request, f'{BASE_ROUTE}/{row["id"]}/edit')}">{tr(request, "Distribute", "طھظˆط²ظٹط¹")}</a>
                 <a class="btn blue" href="{with_lang(request, f'{BASE_ROUTE}/{row["id"]}')}">{tr(request, "Open", "ظپطھط­")}</a>
                 <a class="btn green" href="{with_lang(request, f'{BASE_ROUTE}/{row["id"]}/installments')}">{tr(request, "Edit Installments", "طھط¹ط¯ظٹظ„ ط§ظ„ط£ظ‚ط³ط§ط·")}</a>
+                {f'<form method="post" action="{with_lang(request, f"{BASE_ROUTE}/{row["id"]}/delete")}" style="display:inline;" onsubmit="return confirm(\'{tr(request, "Are you sure you want to delete this advance?", "هل أنت متأكد من حذف هذه السلفة؟")}\')"><button class="btn red" type="submit">{tr(request, "Delete", "حذف")}</button></form>' if can_delete else ""}
             </td>
         </tr>
         """
@@ -1606,6 +1662,7 @@ def advance_open(request: Request, advance_id: int):
     paid_before_start = float(advance["paid_before_start"] or 0)
     balance = max(float(advance["amount"] or 0) - paid - paid_before_start, 0)
     is_ob = int(advance["is_opening_balance"] or 0)
+    can_modify = can_delete_advance(conn, advance)
     conn.close()
 
     deduction_rows = ""
@@ -1690,7 +1747,6 @@ def advance_open(request: Request, advance_id: int):
 
     employee_label = f"{safe(advance['employee_code'])} - {safe(advance['employee_name'])}" if safe(advance["employee_code"]) else (safe(advance["employee_name"]) or safe(advance["journal_employee_name"]) or f"Employee #{safe(advance['employee_id'])}")
     status_cls = "green" if safe(advance["status"]).lower() == "closed" else "orange"
-    can_modify = can_edit_or_delete_advance(dict(advance))
     can_edit_schedule = can_edit_advance_schedule(dict(advance))
     lang = get_lang(request)
     html = f"""
