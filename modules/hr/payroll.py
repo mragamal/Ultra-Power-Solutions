@@ -406,7 +406,7 @@ def employee_payroll_adjustments(conn, employee_id, period_from, period_to):
         SELECT id, reward_no AS doc_no, amount, reason
         FROM employee_rewards
         WHERE employee_id = ?
-          AND LOWER(COALESCE(status, 'draft')) IN ('draft', 'open')
+          AND LOWER(COALESCE(status, 'draft')) IN ('posted', 'open')
           AND COALESCE(payroll_run_id, 0) = 0
           AND {payroll_period_condition('reward_date')}
         ORDER BY reward_date, id
@@ -418,7 +418,7 @@ def employee_payroll_adjustments(conn, employee_id, period_from, period_to):
         SELECT id, penalty_no AS doc_no, amount, reason
         FROM employee_penalties
         WHERE employee_id = ?
-          AND LOWER(COALESCE(status, 'draft')) IN ('draft', 'open')
+          AND LOWER(COALESCE(status, 'draft')) IN ('posted', 'open')
           AND COALESCE(payroll_run_id, 0) = 0
           AND {payroll_period_condition('penalty_date')}
         ORDER BY penalty_date, id
@@ -453,7 +453,7 @@ def clear_payroll_hr_adjustments(conn, run_id):
     conn.execute(
         """
         UPDATE employee_rewards
-        SET status = 'draft', payroll_run_id = NULL, payroll_line_id = NULL
+        SET status = 'posted', payroll_run_id = NULL, payroll_line_id = NULL
         WHERE payroll_run_id = ?
         """,
         (run_id,),
@@ -461,7 +461,7 @@ def clear_payroll_hr_adjustments(conn, run_id):
     conn.execute(
         """
         UPDATE employee_penalties
-        SET status = 'draft', payroll_run_id = NULL, payroll_line_id = NULL
+        SET status = 'posted', payroll_run_id = NULL, payroll_line_id = NULL
         WHERE payroll_run_id = ?
         """,
         (run_id,),
@@ -2158,14 +2158,28 @@ def hr_adjustment_list_page(request, kind):
         body = ""
         for row in rows:
             status = safe(row["status"]) or "draft"
-            status_cls = "green" if status.lower() == "applied" else "orange"
+            status_lower = status.lower()
+            status_cls = "green" if status_lower in ("posted", "applied") else "orange"
             actions = f'<a class="btn blue" href="{base_path}/{row["id"]}">Open</a>'
-            if status.lower() in ("draft", "open"):
+            if status_lower == "draft":
                 actions += f' <a class="btn gray" href="{base_path}/{row["id"]}/edit">Edit</a>'
+                actions += f"""
+                    <form method="post" action="{base_path}/{row['id']}/post" style="display:inline;"
+                          onsubmit="return confirm('Post this record to payroll?');">
+                        <button class="btn green" type="submit">Post</button>
+                    </form>
+                """
                 actions += f"""
                     <form method="post" action="{base_path}/{row['id']}/delete" style="display:inline;"
                           onsubmit="return confirm('Delete this draft record?');">
                         <button class="btn red" type="submit">Delete</button>
+                    </form>
+                """
+            elif status_lower == "open":
+                actions += f"""
+                    <form method="post" action="{base_path}/{row['id']}/post" style="display:inline;"
+                          onsubmit="return confirm('Post this record to payroll?');">
+                        <button class="btn green" type="submit">Post</button>
                     </form>
                 """
             body += f"""
@@ -2268,7 +2282,7 @@ def hr_adjustment_edit_page(request, kind, record_id, error=""):
         row = conn.execute(f"SELECT * FROM {table} WHERE id = ? LIMIT 1", (record_id,)).fetchone()
         if not row:
             return HTMLResponse("Record not found", status_code=404)
-        if safe(row["status"]).lower() not in ("draft", "open"):
+        if safe(row["status"]).lower() != "draft":
             return RedirectResponse(
                 f"{base_path}/{record_id}?msg=" + quote("Only draft records can be edited."),
                 status_code=302,
@@ -2383,7 +2397,7 @@ async def hr_adjustment_update(request, kind, record_id):
         row = conn.execute(f"SELECT * FROM {table} WHERE id = ? LIMIT 1", (record_id,)).fetchone()
         if not row:
             return HTMLResponse("Record not found", status_code=404)
-        if safe(row["status"]).lower() not in ("draft", "open"):
+        if safe(row["status"]).lower() != "draft":
             return RedirectResponse(
                 f"{base_path}/{record_id}?msg=" + quote("Only draft records can be edited."),
                 status_code=302,
@@ -2442,12 +2456,24 @@ def hr_adjustment_open_page(request, kind, record_id):
         msg = safe(request.query_params.get("msg"))
         msg_html = f'<div class="msg success">{escape(msg)}</div>' if msg else ""
         actions = ""
-        if safe(row["status"]).lower() in ("draft", "open"):
+        status_lower = safe(row["status"]).lower()
+        if status_lower == "draft":
             actions = f"""
                 <a class="btn gray" href="{base_path}/{record_id}/edit">Edit</a>
+                <form method="post" action="{base_path}/{record_id}/post" style="display:inline;"
+                      onsubmit="return confirm('Post this record to payroll?');">
+                    <button class="btn green" type="submit">Post</button>
+                </form>
                 <form method="post" action="{base_path}/{record_id}/delete" style="display:inline;"
                       onsubmit="return confirm('Delete this draft record?');">
                     <button class="btn red" type="submit">Delete</button>
+                </form>
+            """
+        elif status_lower == "open":
+            actions = f"""
+                <form method="post" action="{base_path}/{record_id}/post" style="display:inline;"
+                      onsubmit="return confirm('Post this record to payroll?');">
+                    <button class="btn green" type="submit">Post</button>
                 </form>
             """
         attachments_html = attachment_gallery([{"file_url": row["attachment_url"], "file_name": row["attachment_name"]}])
@@ -2461,7 +2487,7 @@ def hr_adjustment_open_page(request, kind, record_id):
                     <p><b>Employee:</b> {escape(safe(row['employee_code']))} - {escape(safe(row['employee_name']))}</p>
                     <p><b>Amount:</b> {money(row['amount'])}</p>
                     <p><b>Reason:</b> {escape(safe(row['reason']))}</p>
-                    <p><b>Status:</b> <span class="status-chip orange">{escape(safe(row['status']))}</span></p>
+                    <p><b>Status:</b> <span class="status-chip {'green' if status_lower in ('posted', 'applied') else 'orange'}">{escape(safe(row['status']))}</span></p>
                 </div>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
                     {actions}
@@ -2489,14 +2515,50 @@ def hr_adjustment_delete(kind, record_id):
         row = conn.execute(f"SELECT * FROM {table} WHERE id = ? LIMIT 1", (record_id,)).fetchone()
         if not row:
             return RedirectResponse(f"{base_path}?msg=" + quote("Record not found."), status_code=302)
-        if safe(row["status"]).lower() not in ("draft", "open"):
-            return RedirectResponse(f"{base_path}?msg=" + quote("Applied records cannot be deleted."), status_code=302)
+        if safe(row["status"]).lower() != "draft":
+            return RedirectResponse(f"{base_path}?msg=" + quote("Only draft records can be deleted."), status_code=302)
         conn.execute(f"DELETE FROM {table} WHERE id = ?", (record_id,))
         conn.commit()
         return RedirectResponse(f"{base_path}?msg=" + quote("Deleted."), status_code=302)
     except Exception as e:
         conn.rollback()
         return HTMLResponse(f"Delete error: {escape(str(e))}", status_code=400)
+    finally:
+        conn.close()
+
+
+def hr_adjustment_post(kind, record_id):
+    ensure_payroll_tables()
+    is_reward = kind == "reward"
+    table = "employee_rewards" if is_reward else "employee_penalties"
+    base_path = "/ui/hr/employee-rewards" if is_reward else "/ui/hr/employee-penalties"
+    conn = get_conn()
+    try:
+        row = conn.execute(f"SELECT * FROM {table} WHERE id = ? LIMIT 1", (record_id,)).fetchone()
+        if not row:
+            return RedirectResponse(f"{base_path}?msg=" + quote("Record not found."), status_code=302)
+        status = safe(row["status"]).lower() or "draft"
+        if status == "applied":
+            return RedirectResponse(
+                f"{base_path}/{record_id}?msg=" + quote("Already applied in payroll."),
+                status_code=302,
+            )
+        if status == "posted":
+            return RedirectResponse(
+                f"{base_path}/{record_id}?msg=" + quote("Already posted."),
+                status_code=302,
+            )
+        if status not in ("draft", "open"):
+            return RedirectResponse(
+                f"{base_path}/{record_id}?msg=" + quote("This record cannot be posted."),
+                status_code=302,
+            )
+        conn.execute(f"UPDATE {table} SET status = 'posted' WHERE id = ?", (record_id,))
+        conn.commit()
+        return RedirectResponse(f"{base_path}/{record_id}?msg=" + quote("Posted to payroll."), status_code=302)
+    except Exception as e:
+        conn.rollback()
+        return HTMLResponse(f"Post error: {escape(str(e))}", status_code=400)
     finally:
         conn.close()
 
@@ -2524,6 +2586,11 @@ def employee_reward_edit(request: Request, record_id: int):
 @router.post("/ui/hr/employee-rewards/{record_id}/edit")
 async def employee_reward_update(request: Request, record_id: int):
     return await hr_adjustment_update(request, "reward", record_id)
+
+
+@router.post("/ui/hr/employee-rewards/{record_id}/post")
+def employee_reward_post(record_id: int):
+    return hr_adjustment_post("reward", record_id)
 
 
 @router.get("/ui/hr/employee-rewards/{record_id}", response_class=HTMLResponse)
@@ -2559,6 +2626,11 @@ def employee_penalty_edit(request: Request, record_id: int):
 @router.post("/ui/hr/employee-penalties/{record_id}/edit")
 async def employee_penalty_update(request: Request, record_id: int):
     return await hr_adjustment_update(request, "penalty", record_id)
+
+
+@router.post("/ui/hr/employee-penalties/{record_id}/post")
+def employee_penalty_post(record_id: int):
+    return hr_adjustment_post("penalty", record_id)
 
 
 @router.get("/ui/hr/employee-penalties/{record_id}", response_class=HTMLResponse)
