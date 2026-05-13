@@ -609,6 +609,28 @@ def status_chip(status: str):
     return f"<span class='status-chip {color}'>{safe(status).replace('_', ' ').title()}</span>"
 
 
+def simple_options(options, selected="", empty_label=""):
+    html = f"<option value=''>{safe(empty_label)}</option>" if empty_label else ""
+    for value, label in options:
+        sel = "selected" if safe(selected) == value else ""
+        html += f"<option value='{safe(value)}' {sel}>{safe(label)}</option>"
+    return html
+
+
+def log_ops_event(request: Request, entity_type: str, entity_id: int, action: str, notes: str = "", conn=None):
+    safe_log_action(
+        entity_type,
+        entity_id,
+        action,
+        done_by=actor_name_from_request(request),
+        notes=notes,
+        conn=conn,
+        module="operations",
+        path=str(request.url.path),
+        method=request.method,
+    )
+
+
 def parse_csv_rows(file_bytes):
     text = file_bytes.decode("utf-8-sig", errors="ignore")
     reader = csv.DictReader(io.StringIO(text))
@@ -2336,6 +2358,824 @@ def save_vehicle(
     conn.commit()
     conn.close()
     return RedirectResponse(f"/ui/operations/vehicles?notice={notice}", status_code=303)
+
+
+@router.get("/ui/operations/contracts", response_class=HTMLResponse)
+def contracts_page(request: Request, edit_id: int = 0, notice: str = ""):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT c.*, co.code AS company_code, co.name AS company_name
+        FROM ops_contracts c
+        LEFT JOIN ops_contract_companies co ON co.id = c.company_id
+        ORDER BY c.id DESC
+    """).fetchall()
+    edit_row = conn.execute("SELECT * FROM ops_contracts WHERE id = ? LIMIT 1", (edit_id,)).fetchone() if edit_id else None
+    conn.close()
+    form_values = dict(edit_row) if edit_row else {
+        "id": 0,
+        "contract_no": next_contract_no(),
+        "company_id": "",
+        "contract_name": "",
+        "pricing_method": "price_list",
+        "start_date": "",
+        "end_date": "",
+        "status": "active",
+        "notes": "",
+    }
+    body = ""
+    for row in rows:
+        body += f"""
+        <tr>
+            <td>{safe(row['contract_no'])}</td>
+            <td>{safe(row['company_code'])} - {safe(row['company_name'])}</td>
+            <td>{safe(row['contract_name'])}</td>
+            <td>{safe(row['pricing_method']).replace('_', ' ').title()}</td>
+            <td>{safe(row['start_date'])}</td>
+            <td>{safe(row['end_date'])}</td>
+            <td>{status_chip(row['status'])}</td>
+            <td><a class="btn blue" href="/ui/operations/contracts?edit_id={row['id']}">Edit</a></td>
+        </tr>
+        """
+    if not body:
+        body = "<tr><td colspan='8' style='text-align:center;'>No contracts added yet.</td></tr>"
+    html = f"""
+    {current_form_notice(notice)}
+    <div class="card">
+        <div class="toolbar">
+            <div><h2 style="margin:0;">Contracts</h2></div>
+            <a class="btn gray" href="/ui/operations">Back to Operations</a>
+        </div>
+        <form method="post" action="/ui/operations/contracts/save">
+            <input type="hidden" name="row_id" value="{safe(form_values.get('id', 0))}">
+            <div class="form-grid">
+                <div class="form-group"><label>Contract No</label><input name="contract_no" value="{safe(form_values.get('contract_no'))}" required></div>
+                <div class="form-group"><label>Company</label><select name="company_id" required>{company_options(form_values.get('company_id'))}</select></div>
+                <div class="form-group"><label>Contract Name</label><input name="contract_name" value="{safe(form_values.get('contract_name'))}" required></div>
+                <div class="form-group"><label>Pricing Method</label><select name="pricing_method">{simple_options([('price_list','Price List'),('manual','Manual'),('contract_version','Contract Version')], form_values.get('pricing_method'))}</select></div>
+                <div class="form-group"><label>Start Date</label><input type="date" name="start_date" value="{safe(form_values.get('start_date'))}"></div>
+                <div class="form-group"><label>End Date</label><input type="date" name="end_date" value="{safe(form_values.get('end_date'))}"></div>
+                <div class="form-group"><label>Status</label><select name="status">{simple_options([('active','Active'),('inactive','Inactive'),('expired','Expired')], form_values.get('status'))}</select></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Notes</label><input name="notes" value="{safe(form_values.get('notes'))}"></div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">{"Update Contract" if safe_int(form_values.get('id')) > 0 else "Save Contract"}</button>
+                <a class="btn gray" href="/ui/operations/contracts">Clear</a>
+            </div>
+        </form>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Contract List</h3>
+        <table>
+            <tr><th>No</th><th>Company</th><th>Name</th><th>Pricing</th><th>Start</th><th>End</th><th>Status</th><th>Action</th></tr>
+            {body}
+        </table>
+    </div>
+    """
+    return render_ops_page(request, "Contracts", html)
+
+
+@router.post("/ui/operations/contracts/save")
+def save_contract(
+    request: Request,
+    row_id: int = Form(0),
+    contract_no: str = Form(""),
+    company_id: int = Form(0),
+    contract_name: str = Form(""),
+    pricing_method: str = Form("price_list"),
+    start_date: str = Form(""),
+    end_date: str = Form(""),
+    status: str = Form("active"),
+    notes: str = Form(""),
+):
+    conn = get_conn()
+    if row_id > 0:
+        conn.execute("""
+            UPDATE ops_contracts
+            SET contract_no = ?, company_id = ?, contract_name = ?, pricing_method = ?,
+                start_date = ?, end_date = ?, status = ?, notes = ?
+            WHERE id = ?
+        """, (safe(contract_no), safe_int(company_id), safe(contract_name), safe(pricing_method), safe(start_date), safe(end_date), safe(status), safe(notes), row_id))
+        log_ops_event(request, "ops_contract", row_id, "Updated", f"Contract {safe(contract_no)}", conn=conn)
+        notice = "updated"
+    else:
+        cur = conn.execute("""
+            INSERT INTO ops_contracts (contract_no, company_id, contract_name, pricing_method, start_date, end_date, status, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (safe(contract_no) or next_contract_no(), safe_int(company_id), safe(contract_name), safe(pricing_method), safe(start_date), safe(end_date), safe(status), safe(notes)))
+        log_ops_event(request, "ops_contract", cur.lastrowid, "Created", f"Contract {safe(contract_no)}", conn=conn)
+        notice = "saved"
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/contracts?notice={notice}", status_code=303)
+
+
+@router.get("/ui/operations/tickets", response_class=HTMLResponse)
+def tickets_page(request: Request, edit_id: int = 0, notice: str = ""):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT t.*, co.name AS company_name, c.contract_no, f.name AS fault_name
+        FROM ops_tickets t
+        LEFT JOIN ops_contract_companies co ON co.id = t.company_id
+        LEFT JOIN ops_contracts c ON c.id = t.contract_id
+        LEFT JOIN ops_fault_types f ON f.id = t.fault_type_id
+        ORDER BY t.id DESC
+    """).fetchall()
+    edit_row = conn.execute("SELECT * FROM ops_tickets WHERE id = ? LIMIT 1", (edit_id,)).fetchone() if edit_id else None
+    conn.close()
+    form_values = dict(edit_row) if edit_row else {
+        "id": 0,
+        "ticket_no": next_ticket_no(),
+        "company_id": "",
+        "contract_id": "",
+        "ticket_date": "",
+        "fault_type_id": "",
+        "site_code": "",
+        "site_name": "",
+        "priority": "normal",
+        "request_channel": "",
+        "complaint_details": "",
+        "status": "open",
+    }
+    body = ""
+    for row in rows:
+        body += f"""
+        <tr>
+            <td>{safe(row['ticket_no'])}</td>
+            <td>{safe(row['ticket_date'])}</td>
+            <td>{safe(row['company_name'])}</td>
+            <td>{safe(row['contract_no'])}</td>
+            <td>{safe(row['fault_name'])}</td>
+            <td>{safe(row['site_code'])}</td>
+            <td>{status_chip(row['status'])}</td>
+            <td><a class="btn blue" href="/ui/operations/tickets?edit_id={row['id']}">Edit</a></td>
+        </tr>
+        """
+    if not body:
+        body = "<tr><td colspan='8' style='text-align:center;'>No tickets opened yet.</td></tr>"
+    html = f"""
+    {current_form_notice(notice)}
+    <div class="card">
+        <div class="toolbar">
+            <div><h2 style="margin:0;">Tickets</h2></div>
+            <a class="btn gray" href="/ui/operations">Back to Operations</a>
+        </div>
+        <form method="post" action="/ui/operations/tickets/save">
+            <input type="hidden" name="row_id" value="{safe(form_values.get('id', 0))}">
+            <div class="form-grid">
+                <div class="form-group"><label>Ticket No</label><input name="ticket_no" value="{safe(form_values.get('ticket_no'))}" required></div>
+                <div class="form-group"><label>Ticket Date</label><input type="date" name="ticket_date" value="{safe(form_values.get('ticket_date'))}" required></div>
+                <div class="form-group"><label>Company</label><select name="company_id" required>{company_options(form_values.get('company_id'))}</select></div>
+                <div class="form-group"><label>Contract</label><select name="contract_id">{contract_options(form_values.get('contract_id'))}</select></div>
+                <div class="form-group"><label>Fault Type</label><select name="fault_type_id">{fault_options(form_values.get('fault_type_id'))}</select></div>
+                <div class="form-group"><label>Priority</label><select name="priority">{simple_options([('low','Low'),('normal','Normal'),('high','High'),('urgent','Urgent')], form_values.get('priority'))}</select></div>
+                <div class="form-group"><label>Site Code</label><input name="site_code" value="{safe(form_values.get('site_code'))}"></div>
+                <div class="form-group"><label>Site Name</label><input name="site_name" value="{safe(form_values.get('site_name'))}"></div>
+                <div class="form-group"><label>Request Channel</label><input name="request_channel" value="{safe(form_values.get('request_channel'))}"></div>
+                <div class="form-group"><label>Status</label><select name="status">{simple_options([('open','Open'),('in_progress','In Progress'),('closed','Closed'),('cancelled','Cancelled')], form_values.get('status'))}</select></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Complaint Details</label><input name="complaint_details" value="{safe(form_values.get('complaint_details'))}"></div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">{"Update Ticket" if safe_int(form_values.get('id')) > 0 else "Save Ticket"}</button>
+                <a class="btn gray" href="/ui/operations/tickets">Clear</a>
+            </div>
+        </form>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Ticket List</h3>
+        <table>
+            <tr><th>No</th><th>Date</th><th>Company</th><th>Contract</th><th>Fault</th><th>Site</th><th>Status</th><th>Action</th></tr>
+            {body}
+        </table>
+    </div>
+    """
+    if safe_int(form_values.get("id")) > 0:
+        html += render_audit_log_card("ops_ticket", safe_int(form_values.get("id")))
+    return render_ops_page(request, "Tickets", html)
+
+
+@router.post("/ui/operations/tickets/save")
+def save_ticket(
+    request: Request,
+    row_id: int = Form(0),
+    ticket_no: str = Form(""),
+    company_id: int = Form(0),
+    contract_id: int = Form(0),
+    ticket_date: str = Form(""),
+    fault_type_id: int = Form(0),
+    site_code: str = Form(""),
+    site_name: str = Form(""),
+    priority: str = Form("normal"),
+    request_channel: str = Form(""),
+    complaint_details: str = Form(""),
+    status: str = Form("open"),
+):
+    conn = get_conn()
+    values = (safe(ticket_no), safe_int(company_id), safe_int(contract_id), safe(ticket_date), safe_int(fault_type_id), safe(site_code), safe(site_name), safe(priority), safe(request_channel), safe(complaint_details), safe(status))
+    if row_id > 0:
+        conn.execute("""
+            UPDATE ops_tickets
+            SET ticket_no = ?, company_id = ?, contract_id = ?, ticket_date = ?, fault_type_id = ?,
+                site_code = ?, site_name = ?, priority = ?, request_channel = ?, complaint_details = ?, status = ?
+            WHERE id = ?
+        """, values + (row_id,))
+        log_ops_event(request, "ops_ticket", row_id, "Updated", f"Ticket {safe(ticket_no)}", conn=conn)
+        notice = "updated"
+    else:
+        cur = conn.execute("""
+            INSERT INTO ops_tickets (
+                ticket_no, company_id, contract_id, ticket_date, fault_type_id, site_code, site_name,
+                priority, request_channel, complaint_details, status, created_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, values + (actor_name_from_request(request),))
+        log_ops_event(request, "ops_ticket", cur.lastrowid, "Created", f"Ticket {safe(ticket_no)}", conn=conn)
+        notice = "saved"
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/tickets?notice={notice}", status_code=303)
+
+
+def work_order_options(selected_id=0):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT id, work_order_no, site_name, status
+        FROM ops_work_orders
+        ORDER BY id DESC
+    """).fetchall()
+    conn.close()
+    html = "<option value=''>-- Select Work Order --</option>"
+    for row in rows:
+        sel = "selected" if str(selected_id or "") == str(row["id"]) else ""
+        label = f"{safe(row['work_order_no'])} - {safe(row['site_name'])} ({safe(row['status'])})"
+        html += f"<option value='{row['id']}' {sel}>{label}</option>"
+    return html
+
+
+@router.get("/ui/operations/work-orders", response_class=HTMLResponse)
+def work_orders_page(request: Request, edit_id: int = 0, notice: str = ""):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT
+            wo.*,
+            co.name AS company_name,
+            f.name AS fault_name,
+            a.name AS action_name,
+            r.name AS region_name,
+            COALESCE(te.employee_name, te.name, te.full_name) AS technician_name,
+            COALESCE(me.employee_name, me.name, me.full_name) AS manager_name
+        FROM ops_work_orders wo
+        LEFT JOIN ops_contract_companies co ON co.id = wo.company_id
+        LEFT JOIN ops_fault_types f ON f.id = wo.fault_type_id
+        LEFT JOIN ops_service_catalog a ON a.id = wo.service_id
+        LEFT JOIN ops_regions r ON r.id = wo.region_id
+        LEFT JOIN employees te ON te.id = wo.technician_id
+        LEFT JOIN employees me ON me.id = wo.manager_id
+        ORDER BY wo.id DESC
+    """).fetchall()
+    edit_row = conn.execute("SELECT * FROM ops_work_orders WHERE id = ? LIMIT 1", (edit_id,)).fetchone() if edit_id else None
+    conn.close()
+    form_values = dict(edit_row) if edit_row else {
+        "id": 0,
+        "work_order_no": next_number("ops_work_orders", "work_order_no", "WO"),
+        "company_id": "",
+        "fault_type_id": "",
+        "service_id": "",
+        "region_id": "",
+        "request_date": "",
+        "site_code": "",
+        "site_name": "",
+        "complaint_details": "",
+        "required_materials": "",
+        "technician_id": "",
+        "manager_id": "",
+        "priority": "normal",
+        "trip_required": 1,
+        "service_price": "0.00",
+        "technician_incentive": "0.00",
+        "region_allowance": "0.00",
+        "status": "new",
+        "closure_notes": "",
+    }
+    body = ""
+    for row in rows:
+        body += f"""
+        <tr>
+            <td>{safe(row['work_order_no'])}</td>
+            <td>{safe(row['request_date'])}</td>
+            <td>{safe(row['company_name'])}</td>
+            <td>{safe(row['fault_name'])}</td>
+            <td>{safe(row['action_name'])}</td>
+            <td>{safe(row['region_name'])}</td>
+            <td>{safe(row['technician_name'])}</td>
+            <td>{money(row['service_price'])}</td>
+            <td>{status_chip(row['status'])}</td>
+            <td><a class="btn blue" href="/ui/operations/work-orders?edit_id={row['id']}">Edit</a></td>
+        </tr>
+        """
+    if not body:
+        body = "<tr><td colspan='10' style='text-align:center;'>No work orders created yet.</td></tr>"
+    trip_checked = "checked" if int(form_values.get("trip_required") or 0) == 1 else ""
+    html = f"""
+    {current_form_notice(notice)}
+    <div class="card">
+        <div class="toolbar">
+            <div><h2 style="margin:0;">Work Orders</h2></div>
+            <a class="btn gray" href="/ui/operations">Back to Operations</a>
+        </div>
+        <form method="post" action="/ui/operations/work-orders/save">
+            <input type="hidden" name="row_id" value="{safe(form_values.get('id', 0))}">
+            <div class="form-grid">
+                <div class="form-group"><label>Work Order No</label><input name="work_order_no" value="{safe(form_values.get('work_order_no'))}" required></div>
+                <div class="form-group"><label>Request Date</label><input type="date" name="request_date" value="{safe(form_values.get('request_date'))}" required></div>
+                <div class="form-group"><label>Company</label><select name="company_id" required>{company_options(form_values.get('company_id'))}</select></div>
+                <div class="form-group"><label>Fault Type</label><select name="fault_type_id">{fault_options(form_values.get('fault_type_id'))}</select></div>
+                <div class="form-group"><label>Action Type</label><select name="service_id">{action_options(form_values.get('service_id'))}</select></div>
+                <div class="form-group"><label>Region</label><select name="region_id">{region_options(form_values.get('region_id'))}</select></div>
+                <div class="form-group"><label>Technician</label><select name="technician_id">{employee_options(form_values.get('technician_id'))}</select></div>
+                <div class="form-group"><label>Supervisor</label><select name="manager_id">{employee_options(form_values.get('manager_id'))}</select></div>
+                <div class="form-group"><label>Priority</label><select name="priority">{simple_options([('low','Low'),('normal','Normal'),('high','High'),('urgent','Urgent')], form_values.get('priority'))}</select></div>
+                <div class="form-group"><label>Status</label><select name="status">{status_options(form_values.get('status'))}</select></div>
+                <div class="form-group"><label>Site Code</label><input name="site_code" value="{safe(form_values.get('site_code'))}"></div>
+                <div class="form-group"><label>Site Name</label><input name="site_name" value="{safe(form_values.get('site_name'))}"></div>
+                <div class="form-group"><label>Billing Price</label><input name="service_price" value="{safe(form_values.get('service_price'))}"></div>
+                <div class="form-group"><label>Technician Incentive</label><input name="technician_incentive" value="{safe(form_values.get('technician_incentive'))}"></div>
+                <div class="form-group"><label>Region Allowance</label><input name="region_allowance" value="{safe(form_values.get('region_allowance'))}"></div>
+                <div class="form-group"><label>Trip Required</label><div style="padding-top:10px;"><label><input type="checkbox" name="trip_required" value="1" {trip_checked}> Needs Trip Ticket</label></div></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Complaint Details</label><input name="complaint_details" value="{safe(form_values.get('complaint_details'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Required Materials / Notes</label><input name="required_materials" value="{safe(form_values.get('required_materials'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Closure Notes</label><input name="closure_notes" value="{safe(form_values.get('closure_notes'))}"></div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">{"Update Work Order" if safe_int(form_values.get('id')) > 0 else "Save Work Order"}</button>
+                <a class="btn gray" href="/ui/operations/work-orders">Clear</a>
+            </div>
+        </form>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Work Order List</h3>
+        <table>
+            <tr><th>No</th><th>Date</th><th>Company</th><th>Fault</th><th>Action</th><th>Region</th><th>Technician</th><th>Billing Price</th><th>Status</th><th>Action</th></tr>
+            {body}
+        </table>
+    </div>
+    """
+    if safe_int(form_values.get("id")) > 0:
+        html += render_audit_log_card("ops_work_order", safe_int(form_values.get("id")))
+    return render_ops_page(request, "Work Orders", html)
+
+
+@router.post("/ui/operations/work-orders/save")
+def save_work_order(
+    request: Request,
+    row_id: int = Form(0),
+    work_order_no: str = Form(""),
+    company_id: int = Form(0),
+    fault_type_id: int = Form(0),
+    service_id: int = Form(0),
+    region_id: int = Form(0),
+    request_date: str = Form(""),
+    site_code: str = Form(""),
+    site_name: str = Form(""),
+    complaint_details: str = Form(""),
+    required_materials: str = Form(""),
+    technician_id: int = Form(0),
+    manager_id: int = Form(0),
+    priority: str = Form("normal"),
+    trip_required: str = Form(""),
+    service_price: str = Form("0"),
+    technician_incentive: str = Form("0"),
+    region_allowance: str = Form("0"),
+    status: str = Form("new"),
+    closure_notes: str = Form(""),
+):
+    conn = get_conn()
+    trip_flag = 1 if safe(trip_required) == "1" else 0
+    values = (
+        safe(work_order_no),
+        safe_int(company_id),
+        safe_int(fault_type_id),
+        safe_int(service_id),
+        safe_int(region_id),
+        safe(request_date),
+        safe(site_code),
+        safe(site_name),
+        safe(complaint_details),
+        safe(required_materials),
+        safe_int(technician_id),
+        safe_int(manager_id),
+        safe(priority),
+        trip_flag,
+        float(q2(service_price)),
+        float(q2(technician_incentive)),
+        float(q2(region_allowance)),
+        safe(status),
+        safe(closure_notes),
+    )
+    if row_id > 0:
+        conn.execute("""
+            UPDATE ops_work_orders
+            SET work_order_no = ?, company_id = ?, fault_type_id = ?, service_id = ?, region_id = ?,
+                request_date = ?, site_code = ?, site_name = ?, complaint_details = ?, required_materials = ?,
+                technician_id = ?, manager_id = ?, priority = ?, trip_required = ?, service_price = ?,
+                technician_incentive = ?, region_allowance = ?, status = ?, closure_notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, values + (row_id,))
+        log_ops_event(request, "ops_work_order", row_id, "Updated", f"Work order {safe(work_order_no)}", conn=conn)
+        notice = "updated"
+    else:
+        cur = conn.execute("""
+            INSERT INTO ops_work_orders (
+                work_order_no, company_id, fault_type_id, service_id, region_id, request_date,
+                site_code, site_name, complaint_details, required_materials, technician_id, manager_id,
+                priority, trip_required, service_price, technician_incentive, region_allowance,
+                status, closure_notes, created_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, values + (actor_name_from_request(request),))
+        log_ops_event(request, "ops_work_order", cur.lastrowid, "Created", f"Work order {safe(work_order_no)}", conn=conn)
+        notice = "saved"
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/work-orders?notice={notice}", status_code=303)
+
+
+def region_options(selected_id=0):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT id, code, name, zone_level
+        FROM ops_regions
+        WHERE COALESCE(is_active, 1) = 1
+        ORDER BY name
+    """).fetchall()
+    conn.close()
+    html = "<option value=''>-- Select Region --</option>"
+    for row in rows:
+        sel = "selected" if str(selected_id or "") == str(row["id"]) else ""
+        label = f"{safe(row['code'])} - {safe(row['name'])} ({safe(row['zone_level'])})"
+        html += f"<option value='{row['id']}' {sel}>{label}</option>"
+    return html
+
+
+@router.get("/ui/operations/technician-reports", response_class=HTMLResponse)
+def technician_reports_page(request: Request, edit_id: int = 0, notice: str = ""):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT tr.*, wo.work_order_no, wo.site_name
+        FROM ops_technician_reports tr
+        LEFT JOIN ops_work_orders wo ON wo.id = tr.work_order_id
+        ORDER BY tr.id DESC
+    """).fetchall()
+    edit_row = conn.execute("SELECT * FROM ops_technician_reports WHERE id = ? LIMIT 1", (edit_id,)).fetchone() if edit_id else None
+    conn.close()
+    form_values = dict(edit_row) if edit_row else {
+        "id": 0,
+        "work_order_id": "",
+        "report_date": "",
+        "arrival_time": "",
+        "completion_time": "",
+        "issue_found": "",
+        "action_taken": "",
+        "materials_used": "",
+        "technician_notes": "",
+        "customer_notes": "",
+        "report_status": "submitted",
+        "service_price": "0.00",
+        "technician_incentive": "0.00",
+        "region_allowance": "0.00",
+        "review_notes": "",
+        "status": "submitted",
+    }
+    body = ""
+    for row in rows:
+        body += f"""
+        <tr>
+            <td>{safe(row['report_date'])}</td>
+            <td>{safe(row['work_order_no'])}</td>
+            <td>{safe(row['site_name'])}</td>
+            <td>{safe(row['issue_found'])}</td>
+            <td>{safe(row['action_taken'])}</td>
+            <td>{status_chip(row['status'])}</td>
+            <td><a class="btn blue" href="/ui/operations/technician-reports?edit_id={row['id']}">Edit</a></td>
+        </tr>
+        """
+    if not body:
+        body = "<tr><td colspan='7' style='text-align:center;'>No technician reports submitted yet.</td></tr>"
+    html = f"""
+    {current_form_notice(notice)}
+    <div class="card">
+        <div class="toolbar">
+            <div><h2 style="margin:0;">Technician Reports</h2></div>
+            <a class="btn gray" href="/ui/operations">Back to Operations</a>
+        </div>
+        <form method="post" action="/ui/operations/technician-reports/save">
+            <input type="hidden" name="row_id" value="{safe(form_values.get('id', 0))}">
+            <div class="form-grid">
+                <div class="form-group"><label>Work Order</label><select name="work_order_id" required>{work_order_options(form_values.get('work_order_id'))}</select></div>
+                <div class="form-group"><label>Report Date</label><input type="date" name="report_date" value="{safe(form_values.get('report_date'))}" required></div>
+                <div class="form-group"><label>Arrival Time</label><input type="time" name="arrival_time" value="{safe(form_values.get('arrival_time'))}"></div>
+                <div class="form-group"><label>Completion Time</label><input type="time" name="completion_time" value="{safe(form_values.get('completion_time'))}"></div>
+                <div class="form-group"><label>Report Status</label><select name="report_status">{simple_options([('submitted','Submitted'),('reviewed','Reviewed'),('approved','Approved'),('rejected','Rejected')], form_values.get('report_status'))}</select></div>
+                <div class="form-group"><label>Status</label><select name="status">{simple_options([('submitted','Submitted'),('approved','Approved'),('rejected','Rejected')], form_values.get('status'))}</select></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Issue Found</label><input name="issue_found" value="{safe(form_values.get('issue_found'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Action Taken</label><input name="action_taken" value="{safe(form_values.get('action_taken'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Materials Used</label><input name="materials_used" value="{safe(form_values.get('materials_used'))}"></div>
+                <div class="form-group"><label>Service Price</label><input name="service_price" value="{safe(form_values.get('service_price'))}"></div>
+                <div class="form-group"><label>Technician Incentive</label><input name="technician_incentive" value="{safe(form_values.get('technician_incentive'))}"></div>
+                <div class="form-group"><label>Region Allowance</label><input name="region_allowance" value="{safe(form_values.get('region_allowance'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Technician Notes</label><input name="technician_notes" value="{safe(form_values.get('technician_notes'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Customer Notes</label><input name="customer_notes" value="{safe(form_values.get('customer_notes'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Review Notes</label><input name="review_notes" value="{safe(form_values.get('review_notes'))}"></div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">{"Update Report" if safe_int(form_values.get('id')) > 0 else "Save Report"}</button>
+                <a class="btn gray" href="/ui/operations/technician-reports">Clear</a>
+            </div>
+        </form>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Report List</h3>
+        <table>
+            <tr><th>Date</th><th>Work Order</th><th>Site</th><th>Issue</th><th>Action Taken</th><th>Status</th><th>Action</th></tr>
+            {body}
+        </table>
+    </div>
+    """
+    if safe_int(form_values.get("id")) > 0:
+        html += render_audit_log_card("ops_technician_report", safe_int(form_values.get("id")))
+    return render_ops_page(request, "Technician Reports", html)
+
+
+@router.post("/ui/operations/technician-reports/save")
+def save_technician_report(
+    request: Request,
+    row_id: int = Form(0),
+    work_order_id: int = Form(0),
+    report_date: str = Form(""),
+    arrival_time: str = Form(""),
+    completion_time: str = Form(""),
+    issue_found: str = Form(""),
+    action_taken: str = Form(""),
+    materials_used: str = Form(""),
+    technician_notes: str = Form(""),
+    customer_notes: str = Form(""),
+    report_status: str = Form("submitted"),
+    service_price: str = Form("0"),
+    technician_incentive: str = Form("0"),
+    region_allowance: str = Form("0"),
+    review_notes: str = Form(""),
+    status: str = Form("submitted"),
+):
+    conn = get_conn()
+    values = (
+        safe_int(work_order_id),
+        safe(report_date),
+        safe(arrival_time),
+        safe(completion_time),
+        safe(issue_found),
+        safe(action_taken),
+        safe(materials_used),
+        safe(technician_notes),
+        safe(customer_notes),
+        safe(report_status),
+        float(q2(service_price)),
+        float(q2(technician_incentive)),
+        float(q2(region_allowance)),
+        safe(review_notes),
+        safe(status),
+    )
+    if row_id > 0:
+        conn.execute("""
+            UPDATE ops_technician_reports
+            SET work_order_id = ?, report_date = ?, arrival_time = ?, completion_time = ?,
+                issue_found = ?, action_taken = ?, materials_used = ?, technician_notes = ?,
+                customer_notes = ?, report_status = ?, service_price = ?, technician_incentive = ?,
+                region_allowance = ?, review_notes = ?, status = ?
+            WHERE id = ?
+        """, values + (row_id,))
+        log_ops_event(request, "ops_technician_report", row_id, "Updated", f"Report for work order id {safe_int(work_order_id)}", conn=conn)
+        notice = "updated"
+    else:
+        cur = conn.execute("""
+            INSERT INTO ops_technician_reports (
+                work_order_id, report_date, arrival_time, completion_time, issue_found, action_taken,
+                materials_used, technician_notes, customer_notes, report_status, service_price,
+                technician_incentive, region_allowance, review_notes, status, submitted_by, submitted_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, values + (actor_name_from_request(request),))
+        log_ops_event(request, "ops_technician_report", cur.lastrowid, "Created", f"Report for work order id {safe_int(work_order_id)}", conn=conn)
+        notice = "saved"
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/technician-reports?notice={notice}", status_code=303)
+
+
+@router.get("/ui/operations/pricing-versions", response_class=HTMLResponse)
+def pricing_versions_page(request: Request, edit_action_id: int = 0, edit_vehicle_id: int = 0, notice: str = ""):
+    conn = get_conn()
+    action_rows = conn.execute("""
+        SELECT pv.*, c.contract_no, a.code AS action_code, a.name AS action_name
+        FROM ops_action_price_versions pv
+        LEFT JOIN ops_contracts c ON c.id = pv.contract_id
+        LEFT JOIN ops_service_catalog a ON a.id = pv.action_id
+        ORDER BY pv.id DESC
+    """).fetchall()
+    vehicle_rows = conn.execute("""
+        SELECT pv.*, c.contract_no, vr.code AS rate_code, vr.vehicle_type, vr.slab_name
+        FROM ops_vehicle_price_versions pv
+        LEFT JOIN ops_contracts c ON c.id = pv.contract_id
+        LEFT JOIN ops_vehicle_rates vr ON vr.id = pv.vehicle_rate_id
+        ORDER BY pv.id DESC
+    """).fetchall()
+    action_edit = conn.execute("SELECT * FROM ops_action_price_versions WHERE id = ?", (edit_action_id,)).fetchone() if edit_action_id else None
+    vehicle_edit = conn.execute("SELECT * FROM ops_vehicle_price_versions WHERE id = ?", (edit_vehicle_id,)).fetchone() if edit_vehicle_id else None
+    conn.close()
+    action_form = dict(action_edit) if action_edit else {"id": 0, "contract_id": "", "action_id": "", "version_name": "", "effective_from": "", "effective_to": "", "fuel_reference": "", "action_price": "0.00", "technician_incentive": "0.00", "region_allowance": "0.00", "is_active": 1, "notes": ""}
+    vehicle_form = dict(vehicle_edit) if vehicle_edit else {"id": 0, "contract_id": "", "vehicle_rate_id": "", "version_name": "", "effective_from": "", "effective_to": "", "fuel_reference": "", "ticket_open_price": "0.00", "second_slab_to_km": "300.00", "km_rate_101_300": "0.00", "km_rate_over_300": "0.00", "waiting_hour_rate": "0.00", "is_active": 1, "notes": ""}
+    action_body = ""
+    for row in action_rows:
+        action_body += f"""
+        <tr>
+            <td>{safe(row['version_name'])}</td>
+            <td>{safe(row['contract_no'])}</td>
+            <td>{safe(row['action_code'])} - {safe(row['action_name'])}</td>
+            <td>{safe(row['effective_from'])}</td>
+            <td>{safe(row['effective_to'])}</td>
+            <td>{money(row['action_price'])}</td>
+            <td>{money(row['technician_incentive'])}</td>
+            <td>{money(row['region_allowance'])}</td>
+            <td>{"Active" if int(row['is_active'] or 0) == 1 else "Inactive"}</td>
+            <td><a class="btn blue" href="/ui/operations/pricing-versions?edit_action_id={row['id']}">Edit</a></td>
+        </tr>
+        """
+    if not action_body:
+        action_body = "<tr><td colspan='10' style='text-align:center;'>No action pricing versions yet.</td></tr>"
+    vehicle_body = ""
+    for row in vehicle_rows:
+        vehicle_body += f"""
+        <tr>
+            <td>{safe(row['version_name'])}</td>
+            <td>{safe(row['contract_no'])}</td>
+            <td>{safe(row['rate_code'])} - {safe(row['vehicle_type'])} / {safe(row['slab_name'])}</td>
+            <td>{safe(row['effective_from'])}</td>
+            <td>{safe(row['effective_to'])}</td>
+            <td>{money(row['ticket_open_price'])}</td>
+            <td>{money(row['km_rate_101_300'])}</td>
+            <td>{money(row['km_rate_over_300'])}</td>
+            <td>{money(row['waiting_hour_rate'])}</td>
+            <td>{"Active" if int(row['is_active'] or 0) == 1 else "Inactive"}</td>
+            <td><a class="btn blue" href="/ui/operations/pricing-versions?edit_vehicle_id={row['id']}">Edit</a></td>
+        </tr>
+        """
+    if not vehicle_body:
+        vehicle_body = "<tr><td colspan='11' style='text-align:center;'>No vehicle pricing versions yet.</td></tr>"
+    html = f"""
+    {current_form_notice(notice)}
+    <div class="card">
+        <div class="toolbar">
+            <div><h2 style="margin:0;">Pricing Versions</h2></div>
+            <a class="btn gray" href="/ui/operations">Back to Operations</a>
+        </div>
+        <form method="post" action="/ui/operations/pricing-versions/action/save">
+            <input type="hidden" name="row_id" value="{safe(action_form.get('id', 0))}">
+            <h3 class="sub-title">Action Price Version</h3>
+            <div class="form-grid">
+                <div class="form-group"><label>Contract</label><select name="contract_id" required>{contract_options(action_form.get('contract_id'))}</select></div>
+                <div class="form-group"><label>Action</label><select name="action_id" required>{action_options(action_form.get('action_id'))}</select></div>
+                <div class="form-group"><label>Version Name</label><input name="version_name" value="{safe(action_form.get('version_name'))}" required></div>
+                <div class="form-group"><label>Effective From</label><input type="date" name="effective_from" value="{safe(action_form.get('effective_from'))}" required></div>
+                <div class="form-group"><label>Effective To</label><input type="date" name="effective_to" value="{safe(action_form.get('effective_to'))}"></div>
+                <div class="form-group"><label>Fuel Reference</label><input name="fuel_reference" value="{safe(action_form.get('fuel_reference'))}"></div>
+                <div class="form-group"><label>Customer Billing Price</label><input name="action_price" value="{safe(action_form.get('action_price'))}"></div>
+                <div class="form-group"><label>Technician Incentive</label><input name="technician_incentive" value="{safe(action_form.get('technician_incentive'))}"></div>
+                <div class="form-group"><label>Region Allowance</label><input name="region_allowance" value="{safe(action_form.get('region_allowance'))}"></div>
+                <div class="form-group"><label>Active</label><div style="padding-top:10px;"><label><input type="checkbox" name="is_active" value="1" {active_checkbox(int(action_form.get('is_active', 1) or 0) == 1)}> Active Version</label></div></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Notes</label><input name="notes" value="{safe(action_form.get('notes'))}"></div>
+            </div>
+            <div class="form-actions"><button class="btn green" type="submit">Save Action Price</button></div>
+        </form>
+    </div>
+    <div class="card">
+        <form method="post" action="/ui/operations/pricing-versions/vehicle/save">
+            <input type="hidden" name="row_id" value="{safe(vehicle_form.get('id', 0))}">
+            <h3 class="sub-title">Vehicle Price Version</h3>
+            <div class="form-grid">
+                <div class="form-group"><label>Contract</label><select name="contract_id" required>{contract_options(vehicle_form.get('contract_id'))}</select></div>
+                <div class="form-group"><label>Vehicle Rate</label><select name="vehicle_rate_id" required>{vehicle_rate_options(vehicle_form.get('vehicle_rate_id'))}</select></div>
+                <div class="form-group"><label>Version Name</label><input name="version_name" value="{safe(vehicle_form.get('version_name'))}" required></div>
+                <div class="form-group"><label>Effective From</label><input type="date" name="effective_from" value="{safe(vehicle_form.get('effective_from'))}" required></div>
+                <div class="form-group"><label>Effective To</label><input type="date" name="effective_to" value="{safe(vehicle_form.get('effective_to'))}"></div>
+                <div class="form-group"><label>Fuel Reference</label><input name="fuel_reference" value="{safe(vehicle_form.get('fuel_reference'))}"></div>
+                <div class="form-group"><label>Ticket Open Price</label><input name="ticket_open_price" value="{safe(vehicle_form.get('ticket_open_price'))}"></div>
+                <div class="form-group"><label>Second Slab To KM</label><input name="second_slab_to_km" value="{safe(vehicle_form.get('second_slab_to_km'))}"></div>
+                <div class="form-group"><label>KM Rate 101-300</label><input name="km_rate_101_300" value="{safe(vehicle_form.get('km_rate_101_300'))}"></div>
+                <div class="form-group"><label>KM Rate Over 300</label><input name="km_rate_over_300" value="{safe(vehicle_form.get('km_rate_over_300'))}"></div>
+                <div class="form-group"><label>Waiting Hour Rate</label><input name="waiting_hour_rate" value="{safe(vehicle_form.get('waiting_hour_rate'))}"></div>
+                <div class="form-group"><label>Active</label><div style="padding-top:10px;"><label><input type="checkbox" name="is_active" value="1" {active_checkbox(int(vehicle_form.get('is_active', 1) or 0) == 1)}> Active Version</label></div></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Notes</label><input name="notes" value="{safe(vehicle_form.get('notes'))}"></div>
+            </div>
+            <div class="form-actions"><button class="btn green" type="submit">Save Vehicle Price</button></div>
+        </form>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Action Price Versions</h3>
+        <table><tr><th>Version</th><th>Contract</th><th>Action</th><th>From</th><th>To</th><th>Price</th><th>Incentive</th><th>Allowance</th><th>Status</th><th>Action</th></tr>{action_body}</table>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Vehicle Price Versions</h3>
+        <table><tr><th>Version</th><th>Contract</th><th>Rate</th><th>From</th><th>To</th><th>Open</th><th>101-300</th><th>Over 300</th><th>Waiting</th><th>Status</th><th>Action</th></tr>{vehicle_body}</table>
+    </div>
+    """
+    return render_ops_page(request, "Pricing Versions", html)
+
+
+@router.post("/ui/operations/pricing-versions/action/save")
+def save_action_price_version(
+    request: Request,
+    row_id: int = Form(0),
+    contract_id: int = Form(0),
+    action_id: int = Form(0),
+    version_name: str = Form(""),
+    effective_from: str = Form(""),
+    effective_to: str = Form(""),
+    fuel_reference: str = Form(""),
+    action_price: str = Form("0"),
+    technician_incentive: str = Form("0"),
+    region_allowance: str = Form("0"),
+    is_active: str = Form(""),
+    notes: str = Form(""),
+):
+    conn = get_conn()
+    active_flag = 1 if safe(is_active) == "1" else 0
+    values = (safe_int(contract_id), safe_int(action_id), safe(version_name), safe(effective_from), safe(effective_to), safe(fuel_reference), float(q2(action_price)), float(q2(technician_incentive)), float(q2(region_allowance)), active_flag, safe(notes))
+    if row_id > 0:
+        conn.execute("""
+            UPDATE ops_action_price_versions
+            SET contract_id = ?, action_id = ?, version_name = ?, effective_from = ?, effective_to = ?,
+                fuel_reference = ?, action_price = ?, technician_incentive = ?, region_allowance = ?, is_active = ?, notes = ?
+            WHERE id = ?
+        """, values + (row_id,))
+        log_ops_event(request, "ops_action_price_version", row_id, "Updated", f"Action price {safe(version_name)}", conn=conn)
+        notice = "updated"
+    else:
+        cur = conn.execute("""
+            INSERT INTO ops_action_price_versions (
+                contract_id, action_id, version_name, effective_from, effective_to, fuel_reference,
+                action_price, technician_incentive, region_allowance, is_active, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, values)
+        log_ops_event(request, "ops_action_price_version", cur.lastrowid, "Created", f"Action price {safe(version_name)}", conn=conn)
+        notice = "saved"
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/pricing-versions?notice={notice}", status_code=303)
+
+
+@router.post("/ui/operations/pricing-versions/vehicle/save")
+def save_vehicle_price_version(
+    request: Request,
+    row_id: int = Form(0),
+    contract_id: int = Form(0),
+    vehicle_rate_id: int = Form(0),
+    version_name: str = Form(""),
+    effective_from: str = Form(""),
+    effective_to: str = Form(""),
+    fuel_reference: str = Form(""),
+    ticket_open_price: str = Form("0"),
+    second_slab_to_km: str = Form("300"),
+    km_rate_101_300: str = Form("0"),
+    km_rate_over_300: str = Form("0"),
+    waiting_hour_rate: str = Form("0"),
+    is_active: str = Form(""),
+    notes: str = Form(""),
+):
+    conn = get_conn()
+    active_flag = 1 if safe(is_active) == "1" else 0
+    values = (safe_int(contract_id), safe_int(vehicle_rate_id), safe(version_name), safe(effective_from), safe(effective_to), safe(fuel_reference), float(q2(ticket_open_price)), float(q2(second_slab_to_km)), float(q2(km_rate_101_300)), float(q2(km_rate_over_300)), float(q2(waiting_hour_rate)), active_flag, safe(notes))
+    if row_id > 0:
+        conn.execute("""
+            UPDATE ops_vehicle_price_versions
+            SET contract_id = ?, vehicle_rate_id = ?, version_name = ?, effective_from = ?, effective_to = ?,
+                fuel_reference = ?, ticket_open_price = ?, second_slab_to_km = ?, km_rate_101_300 = ?,
+                km_rate_over_300 = ?, waiting_hour_rate = ?, is_active = ?, notes = ?
+            WHERE id = ?
+        """, values + (row_id,))
+        log_ops_event(request, "ops_vehicle_price_version", row_id, "Updated", f"Vehicle price {safe(version_name)}", conn=conn)
+        notice = "updated"
+    else:
+        cur = conn.execute("""
+            INSERT INTO ops_vehicle_price_versions (
+                contract_id, vehicle_rate_id, version_name, effective_from, effective_to, fuel_reference,
+                ticket_open_price, second_slab_to_km, km_rate_101_300, km_rate_over_300, waiting_hour_rate, is_active, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, values)
+        log_ops_event(request, "ops_vehicle_price_version", cur.lastrowid, "Created", f"Vehicle price {safe(version_name)}", conn=conn)
+        notice = "saved"
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/pricing-versions?notice={notice}", status_code=303)
 
 
 @router.get("/ui/operations/trips", response_class=HTMLResponse)
