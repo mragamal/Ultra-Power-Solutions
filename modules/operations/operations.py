@@ -56,6 +56,36 @@ DRIVER_SOURCE_OPTIONS = [
     ("supplier_driver", "Supplier Driver"),
 ]
 
+OPS_DEPARTMENTS = [
+    ("operation", "Operation"),
+    ("planning", "Planning"),
+]
+
+CUSTODY_WAREHOUSE_TYPES = [
+    ("operation", "Operation Warehouse"),
+    ("planning", "Planning Warehouse"),
+    ("repair", "Repair Warehouse"),
+]
+
+CUSTOMER_MODULE_STATUSES = [
+    ("faulty", "Faulty"),
+    ("under_repair", "Under Repair"),
+    ("working", "Working"),
+    ("installed", "Installed"),
+    ("returned", "Returned"),
+    ("scrap", "Scrap"),
+]
+
+CUSTODY_MOVEMENT_TYPES = [
+    ("receipt", "Receive From Customer"),
+    ("issue_to_repair", "Issue To Repair"),
+    ("return_from_repair", "Return From Repair"),
+    ("site_issue", "Issue To Site"),
+    ("site_return", "Return From Site"),
+    ("swap_removed", "Swap Removed Faulty Unit"),
+    ("adjustment", "Adjustment"),
+]
+
 
 def safe(value):
     return "" if value is None else str(value).strip()
@@ -382,6 +412,100 @@ def ensure_tables():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ops_customer_custody_warehouses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT,
+            company_id INTEGER NOT NULL,
+            department TEXT DEFAULT 'operation',
+            warehouse_type TEXT DEFAULT 'operation',
+            name TEXT NOT NULL,
+            location TEXT,
+            notes TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ops_customer_custody_stock (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            department TEXT DEFAULT 'operation',
+            warehouse_id INTEGER NOT NULL,
+            item_id INTEGER DEFAULT 0,
+            module_code TEXT,
+            module_name TEXT,
+            serial_no TEXT,
+            status TEXT DEFAULT 'faulty',
+            qty REAL DEFAULT 0,
+            uom TEXT,
+            notes TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ops_customer_custody_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_no TEXT,
+            transaction_date TEXT,
+            company_id INTEGER NOT NULL,
+            department TEXT DEFAULT 'operation',
+            warehouse_id INTEGER NOT NULL,
+            ticket_id INTEGER,
+            work_order_id INTEGER,
+            item_id INTEGER DEFAULT 0,
+            module_code TEXT,
+            module_name TEXT,
+            serial_no TEXT,
+            movement_type TEXT,
+            from_status TEXT,
+            to_status TEXT,
+            qty REAL DEFAULT 0,
+            uom TEXT,
+            notes TEXT,
+            created_by TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    ensure_column(conn, "ops_customer_custody_warehouses", "code", "ALTER TABLE ops_customer_custody_warehouses ADD COLUMN code TEXT")
+    ensure_column(conn, "ops_customer_custody_warehouses", "company_id", "ALTER TABLE ops_customer_custody_warehouses ADD COLUMN company_id INTEGER")
+    ensure_column(conn, "ops_customer_custody_warehouses", "department", "ALTER TABLE ops_customer_custody_warehouses ADD COLUMN department TEXT DEFAULT 'operation'")
+    ensure_column(conn, "ops_customer_custody_warehouses", "warehouse_type", "ALTER TABLE ops_customer_custody_warehouses ADD COLUMN warehouse_type TEXT DEFAULT 'operation'")
+    ensure_column(conn, "ops_customer_custody_warehouses", "name", "ALTER TABLE ops_customer_custody_warehouses ADD COLUMN name TEXT")
+    ensure_column(conn, "ops_customer_custody_warehouses", "location", "ALTER TABLE ops_customer_custody_warehouses ADD COLUMN location TEXT")
+    ensure_column(conn, "ops_customer_custody_warehouses", "notes", "ALTER TABLE ops_customer_custody_warehouses ADD COLUMN notes TEXT")
+    ensure_column(conn, "ops_customer_custody_warehouses", "is_active", "ALTER TABLE ops_customer_custody_warehouses ADD COLUMN is_active INTEGER DEFAULT 1")
+    ensure_column(conn, "ops_customer_custody_stock", "company_id", "ALTER TABLE ops_customer_custody_stock ADD COLUMN company_id INTEGER")
+    ensure_column(conn, "ops_customer_custody_stock", "department", "ALTER TABLE ops_customer_custody_stock ADD COLUMN department TEXT DEFAULT 'operation'")
+    ensure_column(conn, "ops_customer_custody_stock", "warehouse_id", "ALTER TABLE ops_customer_custody_stock ADD COLUMN warehouse_id INTEGER")
+    ensure_column(conn, "ops_customer_custody_stock", "item_id", "ALTER TABLE ops_customer_custody_stock ADD COLUMN item_id INTEGER DEFAULT 0")
+    ensure_column(conn, "ops_customer_custody_stock", "module_code", "ALTER TABLE ops_customer_custody_stock ADD COLUMN module_code TEXT")
+    ensure_column(conn, "ops_customer_custody_stock", "module_name", "ALTER TABLE ops_customer_custody_stock ADD COLUMN module_name TEXT")
+    ensure_column(conn, "ops_customer_custody_stock", "serial_no", "ALTER TABLE ops_customer_custody_stock ADD COLUMN serial_no TEXT")
+    ensure_column(conn, "ops_customer_custody_stock", "status", "ALTER TABLE ops_customer_custody_stock ADD COLUMN status TEXT DEFAULT 'faulty'")
+    ensure_column(conn, "ops_customer_custody_stock", "qty", "ALTER TABLE ops_customer_custody_stock ADD COLUMN qty REAL DEFAULT 0")
+    ensure_column(conn, "ops_customer_custody_stock", "uom", "ALTER TABLE ops_customer_custody_stock ADD COLUMN uom TEXT")
+    ensure_column(conn, "ops_customer_custody_stock", "notes", "ALTER TABLE ops_customer_custody_stock ADD COLUMN notes TEXT")
+    ensure_column(conn, "ops_customer_custody_stock", "updated_at", "ALTER TABLE ops_customer_custody_stock ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
+    ensure_column(conn, "ops_customer_custody_transactions", "transaction_no", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN transaction_no TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "transaction_date", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN transaction_date TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "company_id", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN company_id INTEGER")
+    ensure_column(conn, "ops_customer_custody_transactions", "department", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN department TEXT DEFAULT 'operation'")
+    ensure_column(conn, "ops_customer_custody_transactions", "warehouse_id", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN warehouse_id INTEGER")
+    ensure_column(conn, "ops_customer_custody_transactions", "ticket_id", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN ticket_id INTEGER")
+    ensure_column(conn, "ops_customer_custody_transactions", "work_order_id", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN work_order_id INTEGER")
+    ensure_column(conn, "ops_customer_custody_transactions", "item_id", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN item_id INTEGER DEFAULT 0")
+    ensure_column(conn, "ops_customer_custody_transactions", "module_code", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN module_code TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "module_name", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN module_name TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "serial_no", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN serial_no TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "movement_type", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN movement_type TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "from_status", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN from_status TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "to_status", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN to_status TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "qty", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN qty REAL DEFAULT 0")
+    ensure_column(conn, "ops_customer_custody_transactions", "uom", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN uom TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "notes", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN notes TEXT")
+    ensure_column(conn, "ops_customer_custody_transactions", "created_by", "ALTER TABLE ops_customer_custody_transactions ADD COLUMN created_by TEXT")
     ensure_column(conn, "ops_work_orders", "request_date", "ALTER TABLE ops_work_orders ADD COLUMN request_date TEXT")
     ensure_column(conn, "ops_work_orders", "site_code", "ALTER TABLE ops_work_orders ADD COLUMN site_code TEXT")
     ensure_column(conn, "ops_work_orders", "site_name", "ALTER TABLE ops_work_orders ADD COLUMN site_name TEXT")
@@ -531,6 +655,9 @@ def ensure_tables():
     ensure_column(conn, "employees", "trip_commission_pct", "ALTER TABLE employees ADD COLUMN trip_commission_pct REAL DEFAULT 0")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_report_work_order ON ops_technician_reports(work_order_id)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_trip_work_order_unique ON ops_trip_work_orders(trip_id, work_order_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ops_custody_wh_company_department ON ops_customer_custody_warehouses(company_id, department)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ops_custody_stock_lookup ON ops_customer_custody_stock(company_id, department, warehouse_id, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ops_custody_tx_lookup ON ops_customer_custody_transactions(company_id, department, warehouse_id, transaction_date)")
     conn.commit()
     conn.close()
 
@@ -681,6 +808,14 @@ def next_vehicle_code():
     return next_code("ops_vehicles", "CAR")
 
 
+def next_custody_warehouse_code():
+    return next_code("ops_customer_custody_warehouses", "CCW")
+
+
+def next_custody_transaction_no():
+    return next_number("ops_customer_custody_transactions", "transaction_no", "CCT")
+
+
 def normalize_action_import_row(row):
     return {
         "code": safe(row.get("code") or row.get("action_code") or row.get("item_code")),
@@ -789,6 +924,191 @@ def item_options(selected_id=0):
         label = f"{safe(row['code'])} - {safe(row['name'])} ({safe(row['uom'])})"
         html += f"<option value='{row['id']}' {sel}>{label}</option>"
     return html
+
+
+def get_item_snapshot(item_id=0):
+    if safe_int(item_id) <= 0:
+        return {"id": 0, "code": "", "name": "", "uom": ""}
+    conn = get_conn()
+    row = conn.execute("SELECT id, code, name, uom FROM items WHERE id = ? LIMIT 1", (safe_int(item_id),)).fetchone()
+    conn.close()
+    if not row:
+        return {"id": 0, "code": "", "name": "", "uom": ""}
+    return {"id": row["id"], "code": safe(row["code"]), "name": safe(row["name"]), "uom": safe(row["uom"])}
+
+
+def custody_warehouse_options(selected_id=0, company_id=0, department=""):
+    conn = get_conn()
+    sql = """
+        SELECT w.id, w.code, w.name, w.department, w.warehouse_type, c.name AS company_name
+        FROM ops_customer_custody_warehouses w
+        LEFT JOIN ops_contract_companies c ON c.id = w.company_id
+        WHERE COALESCE(w.is_active, 1) = 1
+    """
+    params = []
+    if safe_int(company_id) > 0:
+        sql += " AND w.company_id = ?"
+        params.append(safe_int(company_id))
+    if safe(department):
+        sql += " AND LOWER(COALESCE(w.department, '')) = ?"
+        params.append(safe(department).lower())
+    sql += " ORDER BY c.name, w.department, w.name"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    html = "<option value=''>-- Select Customer Warehouse --</option>"
+    for row in rows:
+        sel = "selected" if str(selected_id or "") == str(row["id"]) else ""
+        label = f"{safe(row['code'])} - {safe(row['company_name'])} / {safe(row['department']).title()} / {safe(row['name'])}"
+        html += f"<option value='{row['id']}' {sel}>{label}</option>"
+    return html
+
+
+def work_order_options(selected_id=0):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT id, work_order_no, site_code, site_name, status
+        FROM ops_work_orders
+        ORDER BY id DESC
+        LIMIT 250
+    """).fetchall()
+    conn.close()
+    html = "<option value=''>-- Select Work Order --</option>"
+    for row in rows:
+        sel = "selected" if str(selected_id or "") == str(row["id"]) else ""
+        label = safe(row["work_order_no"]) or f"WO-{row['id']}"
+        extras = [x for x in [safe(row["site_code"]), safe(row["site_name"]), safe(row["status"])] if x]
+        if extras:
+            label = f"{label} - {' / '.join(extras)}"
+        html += f"<option value='{row['id']}' {sel}>{label}</option>"
+    return html
+
+
+def ticket_options(selected_id=0):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT id, ticket_no, site_code, site_name, status
+        FROM ops_tickets
+        ORDER BY id DESC
+        LIMIT 250
+    """).fetchall()
+    conn.close()
+    html = "<option value=''>-- Select Ticket --</option>"
+    for row in rows:
+        sel = "selected" if str(selected_id or "") == str(row["id"]) else ""
+        label = safe(row["ticket_no"]) or f"TKT-{row['id']}"
+        extras = [x for x in [safe(row["site_code"]), safe(row["site_name"]), safe(row["status"])] if x]
+        if extras:
+            label = f"{label} - {' / '.join(extras)}"
+        html += f"<option value='{row['id']}' {sel}>{label}</option>"
+    return html
+
+
+def custody_stock_status_cell(status):
+    color = {
+        "faulty": "#fee2e2",
+        "under_repair": "#fef3c7",
+        "working": "#dcfce7",
+        "installed": "#dbeafe",
+        "returned": "#ede9fe",
+        "scrap": "#f3f4f6",
+    }.get(safe(status), "#eef2ff")
+    return f"<span class='summary-pill' style='background:{color};'>{safe(status).replace('_', ' ').title()}</span>"
+
+
+def adjust_customer_custody_stock(
+    conn,
+    company_id,
+    department,
+    warehouse_id,
+    item_id,
+    module_code,
+    module_name,
+    serial_no,
+    status,
+    qty_delta,
+    uom,
+    notes="",
+):
+    status = safe(status) or "faulty"
+    delta = float(qty_delta or 0)
+    item_id = safe_int(item_id)
+    row = conn.execute("""
+        SELECT *
+        FROM ops_customer_custody_stock
+        WHERE company_id = ?
+          AND COALESCE(department, '') = ?
+          AND warehouse_id = ?
+          AND COALESCE(item_id, 0) = ?
+          AND COALESCE(module_code, '') = ?
+          AND COALESCE(module_name, '') = ?
+          AND COALESCE(serial_no, '') = ?
+          AND COALESCE(status, '') = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (
+        safe_int(company_id),
+        safe(department) or "operation",
+        safe_int(warehouse_id),
+        item_id,
+        safe(module_code),
+        safe(module_name),
+        safe(serial_no),
+        status,
+    )).fetchone()
+    current_qty = float(row["qty"] or 0) if row else 0.0
+    new_qty = current_qty + delta
+    if new_qty < -0.00001:
+        raise Exception(f"Not enough customer custody stock for {safe(module_name) or safe(module_code)} in status {status}.")
+    if row:
+        conn.execute("""
+            UPDATE ops_customer_custody_stock
+            SET qty = ?, module_name = ?, uom = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (new_qty, safe(module_name), safe(uom), safe(notes), row["id"]))
+    else:
+        conn.execute("""
+            INSERT INTO ops_customer_custody_stock (
+                company_id, department, warehouse_id, item_id, module_code, module_name,
+                serial_no, status, qty, uom, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            safe_int(company_id),
+            safe(department) or "operation",
+            safe_int(warehouse_id),
+            item_id,
+            safe(module_code),
+            safe(module_name),
+            safe(serial_no),
+            status,
+            new_qty,
+            safe(uom),
+            safe(notes),
+        ))
+
+
+def apply_customer_custody_movement(conn, movement_type, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, from_status, to_status, qty, uom, notes=""):
+    qty_value = float(q2(qty))
+    if qty_value <= 0:
+        raise Exception("Quantity must be greater than zero.")
+    movement = safe(movement_type) or "receipt"
+    if movement == "receipt":
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or "faulty", qty_value, uom, notes)
+    elif movement == "issue_to_repair":
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, from_status or "faulty", -qty_value, uom, notes)
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or "under_repair", qty_value, uom, notes)
+    elif movement == "return_from_repair":
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, from_status or "under_repair", -qty_value, uom, notes)
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or "working", qty_value, uom, notes)
+    elif movement == "site_issue":
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, from_status or "working", -qty_value, uom, notes)
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or "installed", qty_value, uom, notes)
+    elif movement in ["site_return", "swap_removed"]:
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or "faulty", qty_value, uom, notes)
+    elif movement == "adjustment":
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or from_status or "faulty", qty_value, uom, notes)
+    else:
+        raise Exception("Unsupported customer custody movement type.")
 
 
 def employee_display_name(row):
@@ -1168,6 +1488,9 @@ def operations_root(request: Request):
         ("Vehicles", "/ui/operations/vehicles", "/static/icons/goods-receipts.svg", "Vehicle master with code, rental office, driver source, and linked rate."),
         ("Rental Offices", "/ui/operations/rental-suppliers", "/static/icons/vendors.svg", "Rental suppliers or car offices that provide vehicles by location."),
         ("Work Orders", "/ui/operations/work-orders", "/static/icons/journal.svg", "Create, assign, track, and review field maintenance and workshop jobs."),
+        ("Customer Warehouses", "/ui/operations/customer-custody-warehouses", "/static/icons/inventory.svg", "Separate customer custody warehouses by customer department: Operation, Planning, or Repair."),
+        ("Customer Stock", "/ui/operations/customer-custody-stock", "/static/icons/inventory.svg", "Operational module balances by customer warehouse and lifecycle status without accounting valuation."),
+        ("Custody Movements", "/ui/operations/customer-custody-transactions", "/static/icons/goods-receipts.svg", "Receive, issue, repair-return, swap, and site movement history for customer-owned modules."),
         ("Contract Companies", "/ui/operations/companies", "/static/icons/customers.svg", "Companies that send faults, modules, assemblies, and customer custody stock."),
         ("Fault Types", "/ui/operations/fault-types", "/static/icons/reports.svg", "Known fault codes used when opening tickets and classifying field issues."),
         ("Regions", "/ui/operations/regions", "/static/icons/reports.svg", "Zone allowances for field visits and technician bonus by area."),
@@ -1193,6 +1516,8 @@ def operations_root(request: Request):
                 <span class="summary-pill">Vehicle Rates: {count_rows('ops_vehicle_rates')}</span>
                 <span class="summary-pill">Trips: {count_rows('ops_trip_tickets')}</span>
                 <span class="summary-pill">Work Orders: {count_rows('ops_work_orders')}</span>
+                <span class="summary-pill">Customer Warehouses: {count_rows('ops_customer_custody_warehouses')}</span>
+                <span class="summary-pill">Custody Movements: {count_rows('ops_customer_custody_transactions')}</span>
             </div>
         </div>
     </div>
@@ -1211,6 +1536,391 @@ def operations_root(request: Request):
     """
     content = summary + '<div class="card"><h3 class="sub-title">Master Data</h3>' + module_cards(setup_cards) + "</div>" + workflow
     return render_ops_page(request, "Operations", content)
+
+
+@router.get("/ui/operations/customer-custody-warehouses", response_class=HTMLResponse)
+def customer_custody_warehouses_page(request: Request, edit_id: int = 0, notice: str = ""):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT w.*, c.code AS company_code, c.name AS company_name
+        FROM ops_customer_custody_warehouses w
+        LEFT JOIN ops_contract_companies c ON c.id = w.company_id
+        ORDER BY c.name, w.department, w.name
+    """).fetchall()
+    edit_row = conn.execute("SELECT * FROM ops_customer_custody_warehouses WHERE id = ? LIMIT 1", (edit_id,)).fetchone() if edit_id else None
+    conn.close()
+    form_values = dict(edit_row) if edit_row else {
+        "id": 0,
+        "code": next_custody_warehouse_code(),
+        "company_id": "",
+        "department": "operation",
+        "warehouse_type": "operation",
+        "name": "",
+        "location": "",
+        "notes": "",
+        "is_active": 1,
+    }
+    body = ""
+    for row in rows:
+        body += f"""
+        <tr>
+            <td>{safe(row['code'])}</td>
+            <td>{safe(row['company_code'])} - {safe(row['company_name'])}</td>
+            <td>{safe(row['department']).title()}</td>
+            <td>{safe(row['warehouse_type']).replace('_', ' ').title()}</td>
+            <td>{safe(row['name'])}</td>
+            <td>{safe(row['location'])}</td>
+            <td>{'Active' if int(row['is_active'] or 0) == 1 else 'Inactive'}</td>
+            <td><a class="btn blue" href="/ui/operations/customer-custody-warehouses?edit_id={row['id']}">Edit</a></td>
+        </tr>
+        """
+    if not body:
+        body = "<tr><td colspan='8' style='text-align:center;'>No customer custody warehouses added yet.</td></tr>"
+    html = f"""
+    {current_form_notice(notice)}
+    <div class="card">
+        <div class="toolbar">
+            <div>
+                <h2 style="margin:0;">Customer Custody Warehouses</h2>
+                <div class="section-note">One customer can have separate Operation, Planning, and Repair warehouses.</div>
+            </div>
+            <a class="btn gray" href="/ui/operations">Back to Operations</a>
+        </div>
+        <form method="post" action="/ui/operations/customer-custody-warehouses/save">
+            <input type="hidden" name="row_id" value="{safe(form_values.get('id', 0))}">
+            <div class="form-grid">
+                <div class="form-group"><label>Code</label><input name="code" value="{safe(form_values.get('code'))}" required></div>
+                <div class="form-group"><label>Customer</label><select name="company_id" required>{company_options(form_values.get('company_id'))}</select></div>
+                <div class="form-group"><label>Department</label><select name="department" required>{simple_options(OPS_DEPARTMENTS, form_values.get('department'))}</select></div>
+                <div class="form-group"><label>Warehouse Type</label><select name="warehouse_type" required>{simple_options(CUSTODY_WAREHOUSE_TYPES, form_values.get('warehouse_type'))}</select></div>
+                <div class="form-group"><label>Warehouse Name</label><input name="name" value="{safe(form_values.get('name'))}" required></div>
+                <div class="form-group"><label>Location</label><input name="location" value="{safe(form_values.get('location'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Notes</label><input name="notes" value="{safe(form_values.get('notes'))}"></div>
+                <div class="form-group"><label>Active</label><div style="padding-top:10px;"><label><input type="checkbox" name="is_active" value="1" {active_checkbox(int(form_values.get('is_active', 1) or 0) == 1)}> Active</label></div></div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">{"Update Warehouse" if safe_int(form_values.get('id')) > 0 else "Save Warehouse"}</button>
+                <a class="btn gray" href="/ui/operations/customer-custody-warehouses">Clear</a>
+            </div>
+        </form>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Warehouses</h3>
+        <table>
+            <tr><th>Code</th><th>Customer</th><th>Department</th><th>Type</th><th>Name</th><th>Location</th><th>Status</th><th>Action</th></tr>
+            {body}
+        </table>
+    </div>
+    """
+    return render_ops_page(request, "Customer Custody Warehouses", html)
+
+
+@router.post("/ui/operations/customer-custody-warehouses/save")
+def save_customer_custody_warehouse(
+    request: Request,
+    row_id: int = Form(0),
+    code: str = Form(""),
+    company_id: int = Form(0),
+    department: str = Form("operation"),
+    warehouse_type: str = Form("operation"),
+    name: str = Form(""),
+    location: str = Form(""),
+    notes: str = Form(""),
+    is_active: str = Form(""),
+):
+    conn = get_conn()
+    active_flag = 1 if safe(is_active) == "1" else 0
+    values = (
+        safe(code) or next_custody_warehouse_code(),
+        safe_int(company_id),
+        safe(department) or "operation",
+        safe(warehouse_type) or "operation",
+        safe(name),
+        safe(location),
+        safe(notes),
+        active_flag,
+    )
+    if row_id > 0:
+        conn.execute("""
+            UPDATE ops_customer_custody_warehouses
+            SET code = ?, company_id = ?, department = ?, warehouse_type = ?, name = ?, location = ?, notes = ?, is_active = ?
+            WHERE id = ?
+        """, values + (row_id,))
+        notice = "updated"
+        entity_id = row_id
+    else:
+        cur = conn.execute("""
+            INSERT INTO ops_customer_custody_warehouses (
+                code, company_id, department, warehouse_type, name, location, notes, is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, values)
+        notice = "saved"
+        entity_id = cur.lastrowid
+    log_ops_event(request, "ops_customer_custody_warehouse", safe_int(entity_id), "saved", f"Warehouse {safe(code) or safe(name)}", conn=conn)
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/customer-custody-warehouses?notice={notice}", status_code=303)
+
+
+@router.get("/ui/operations/customer-custody-stock", response_class=HTMLResponse)
+def customer_custody_stock_page(request: Request, company_id: int = 0, department: str = "", warehouse_id: int = 0, status: str = ""):
+    conn = get_conn()
+    sql = """
+        SELECT s.*, c.code AS company_code, c.name AS company_name, w.code AS warehouse_code, w.name AS warehouse_name
+        FROM ops_customer_custody_stock s
+        LEFT JOIN ops_contract_companies c ON c.id = s.company_id
+        LEFT JOIN ops_customer_custody_warehouses w ON w.id = s.warehouse_id
+        WHERE ABS(COALESCE(s.qty, 0)) > 0.00001
+    """
+    params = []
+    if safe_int(company_id) > 0:
+        sql += " AND s.company_id = ?"
+        params.append(safe_int(company_id))
+    if safe(department):
+        sql += " AND COALESCE(s.department, '') = ?"
+        params.append(safe(department))
+    if safe_int(warehouse_id) > 0:
+        sql += " AND s.warehouse_id = ?"
+        params.append(safe_int(warehouse_id))
+    if safe(status):
+        sql += " AND COALESCE(s.status, '') = ?"
+        params.append(safe(status))
+    sql += " ORDER BY c.name, s.department, w.name, s.module_name, s.status"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    body = ""
+    total_qty = Decimal("0")
+    for row in rows:
+        total_qty += to_decimal(row["qty"])
+        module_label = safe(row["module_name"]) or safe(row["module_code"])
+        if safe(row["module_code"]):
+            module_label = f"{safe(row['module_code'])} - {module_label}" if safe(row["module_name"]) else safe(row["module_code"])
+        body += f"""
+        <tr>
+            <td>{safe(row['company_code'])} - {safe(row['company_name'])}</td>
+            <td>{safe(row['department']).title()}</td>
+            <td>{safe(row['warehouse_code'])} - {safe(row['warehouse_name'])}</td>
+            <td>{module_label}</td>
+            <td>{safe(row['serial_no'])}</td>
+            <td>{custody_stock_status_cell(row['status'])}</td>
+            <td>{money(row['qty'])}</td>
+            <td>{safe(row['uom'])}</td>
+        </tr>
+        """
+    if not body:
+        body = "<tr><td colspan='8' style='text-align:center;'>No customer custody stock found.</td></tr>"
+    html = f"""
+    <div class="card">
+        <div class="toolbar">
+            <div>
+                <h2 style="margin:0;">Customer Custody Stock</h2>
+                <div class="section-note">Operational balances only. Customer-owned modules do not affect accounting inventory valuation.</div>
+            </div>
+            <a class="btn gray" href="/ui/operations">Back to Operations</a>
+        </div>
+        <form method="get" action="/ui/operations/customer-custody-stock">
+            <div class="form-grid">
+                <div class="form-group"><label>Customer</label><select name="company_id">{company_options(company_id)}</select></div>
+                <div class="form-group"><label>Department</label><select name="department">{simple_options(OPS_DEPARTMENTS, department, "-- All Departments --")}</select></div>
+                <div class="form-group"><label>Warehouse</label><select name="warehouse_id">{custody_warehouse_options(warehouse_id, company_id, department)}</select></div>
+                <div class="form-group"><label>Status</label><select name="status">{simple_options(CUSTOMER_MODULE_STATUSES, status, "-- All Statuses --")}</select></div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">Filter</button>
+                <a class="btn gray" href="/ui/operations/customer-custody-stock">Clear</a>
+                <a class="btn blue" href="/ui/operations/customer-custody-transactions">New Movement</a>
+            </div>
+        </form>
+    </div>
+    <div class="card">
+        <div class="toolbar">
+            <h3 class="sub-title">Stock Balances</h3>
+            <span class="summary-pill">Total Qty: {money(total_qty)}</span>
+        </div>
+        <table>
+            <tr><th>Customer</th><th>Department</th><th>Warehouse</th><th>Module</th><th>Serial</th><th>Status</th><th>Qty</th><th>UOM</th></tr>
+            {body}
+        </table>
+    </div>
+    """
+    return render_ops_page(request, "Customer Custody Stock", html)
+
+
+@router.get("/ui/operations/customer-custody-transactions", response_class=HTMLResponse)
+def customer_custody_transactions_page(request: Request, notice: str = "", company_id: int = 0, department: str = "", warehouse_id: int = 0):
+    conn = get_conn()
+    sql = """
+        SELECT t.*, c.code AS company_code, c.name AS company_name, w.code AS warehouse_code, w.name AS warehouse_name,
+               wo.work_order_no, tk.ticket_no
+        FROM ops_customer_custody_transactions t
+        LEFT JOIN ops_contract_companies c ON c.id = t.company_id
+        LEFT JOIN ops_customer_custody_warehouses w ON w.id = t.warehouse_id
+        LEFT JOIN ops_work_orders wo ON wo.id = t.work_order_id
+        LEFT JOIN ops_tickets tk ON tk.id = t.ticket_id
+        WHERE 1 = 1
+    """
+    params = []
+    if safe_int(company_id) > 0:
+        sql += " AND t.company_id = ?"
+        params.append(safe_int(company_id))
+    if safe(department):
+        sql += " AND t.department = ?"
+        params.append(safe(department))
+    if safe_int(warehouse_id) > 0:
+        sql += " AND t.warehouse_id = ?"
+        params.append(safe_int(warehouse_id))
+    sql += " ORDER BY t.id DESC LIMIT 250"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    body = ""
+    for row in rows:
+        module_label = safe(row["module_name"]) or safe(row["module_code"])
+        if safe(row["module_code"]):
+            module_label = f"{safe(row['module_code'])} - {module_label}" if safe(row["module_name"]) else safe(row["module_code"])
+        body += f"""
+        <tr>
+            <td>{safe(row['transaction_no'])}</td>
+            <td>{safe(row['transaction_date'])}</td>
+            <td>{safe(row['company_code'])} - {safe(row['company_name'])}</td>
+            <td>{safe(row['department']).title()}</td>
+            <td>{safe(row['warehouse_code'])} - {safe(row['warehouse_name'])}</td>
+            <td>{safe(row['movement_type']).replace('_', ' ').title()}</td>
+            <td>{module_label}</td>
+            <td>{safe(row['from_status']).replace('_', ' ').title()} -> {safe(row['to_status']).replace('_', ' ').title()}</td>
+            <td>{money(row['qty'])}</td>
+            <td>{safe(row['work_order_no']) or safe(row['ticket_no'])}</td>
+        </tr>
+        """
+    if not body:
+        body = "<tr><td colspan='10' style='text-align:center;'>No custody movements found.</td></tr>"
+    html = f"""
+    {current_form_notice(notice)}
+    <div class="card">
+        <div class="toolbar">
+            <div>
+                <h2 style="margin:0;">Customer Custody Movement</h2>
+                <div class="section-note">Use this for Orange Operation and Planning warehouse movements before linking deeper work-order flows.</div>
+            </div>
+            <a class="btn gray" href="/ui/operations">Back to Operations</a>
+        </div>
+        <form method="post" action="/ui/operations/customer-custody-transactions/save">
+            <div class="form-grid">
+                <div class="form-group"><label>No</label><input name="transaction_no" value="{next_custody_transaction_no()}" required></div>
+                <div class="form-group"><label>Date</label><input type="date" name="transaction_date" required></div>
+                <div class="form-group"><label>Customer</label><select name="company_id" required>{company_options(company_id)}</select></div>
+                <div class="form-group"><label>Department</label><select name="department" required>{simple_options(OPS_DEPARTMENTS, department or 'operation')}</select></div>
+                <div class="form-group"><label>Customer Warehouse</label><select name="warehouse_id" required>{custody_warehouse_options(warehouse_id, company_id, department)}</select></div>
+                <div class="form-group"><label>Movement Type</label><select name="movement_type" required>{simple_options(CUSTODY_MOVEMENT_TYPES, 'receipt')}</select></div>
+                <div class="form-group"><label>Item Master (Optional)</label><select name="item_id">{item_options()}</select></div>
+                <div class="form-group"><label>Module Code</label><input name="module_code"></div>
+                <div class="form-group"><label>Module Name</label><input name="module_name" required></div>
+                <div class="form-group"><label>Serial No</label><input name="serial_no"></div>
+                <div class="form-group"><label>From Status</label><select name="from_status">{simple_options(CUSTOMER_MODULE_STATUSES, 'faulty', "-- No From Status --")}</select></div>
+                <div class="form-group"><label>To Status</label><select name="to_status">{simple_options(CUSTOMER_MODULE_STATUSES, 'faulty')}</select></div>
+                <div class="form-group"><label>Qty</label><input type="number" step="0.01" name="qty" required></div>
+                <div class="form-group"><label>UOM</label><input name="uom" value="PCS"></div>
+                <div class="form-group"><label>Ticket</label><select name="ticket_id">{ticket_options()}</select></div>
+                <div class="form-group"><label>Work Order</label><select name="work_order_id">{work_order_options()}</select></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Notes</label><input name="notes"></div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">Save Movement</button>
+                <a class="btn gray" href="/ui/operations/customer-custody-transactions">Clear</a>
+            </div>
+        </form>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Latest Movements</h3>
+        <table>
+            <tr><th>No</th><th>Date</th><th>Customer</th><th>Department</th><th>Warehouse</th><th>Movement</th><th>Module</th><th>Status Flow</th><th>Qty</th><th>Linked Doc</th></tr>
+            {body}
+        </table>
+    </div>
+    """
+    return render_ops_page(request, "Customer Custody Movement", html)
+
+
+@router.post("/ui/operations/customer-custody-transactions/save")
+def save_customer_custody_transaction(
+    request: Request,
+    transaction_no: str = Form(""),
+    transaction_date: str = Form(""),
+    company_id: int = Form(0),
+    department: str = Form("operation"),
+    warehouse_id: int = Form(0),
+    ticket_id: int = Form(0),
+    work_order_id: int = Form(0),
+    item_id: int = Form(0),
+    module_code: str = Form(""),
+    module_name: str = Form(""),
+    serial_no: str = Form(""),
+    movement_type: str = Form("receipt"),
+    from_status: str = Form(""),
+    to_status: str = Form("faulty"),
+    qty: str = Form("0"),
+    uom: str = Form("PCS"),
+    notes: str = Form(""),
+):
+    conn = get_conn()
+    item = get_item_snapshot(item_id)
+    final_module_code = safe(module_code) or item["code"]
+    final_module_name = safe(module_name) or item["name"] or final_module_code
+    final_uom = safe(uom) or item["uom"] or "PCS"
+    try:
+        apply_customer_custody_movement(
+            conn,
+            movement_type,
+            company_id,
+            safe(department) or "operation",
+            warehouse_id,
+            safe_int(item_id),
+            final_module_code,
+            final_module_name,
+            serial_no,
+            from_status,
+            to_status,
+            qty,
+            final_uom,
+            notes,
+        )
+        cur = conn.execute("""
+            INSERT INTO ops_customer_custody_transactions (
+                transaction_no, transaction_date, company_id, department, warehouse_id,
+                ticket_id, work_order_id, item_id, module_code, module_name, serial_no,
+                movement_type, from_status, to_status, qty, uom, notes, created_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            safe(transaction_no) or next_custody_transaction_no(),
+            safe(transaction_date),
+            safe_int(company_id),
+            safe(department) or "operation",
+            safe_int(warehouse_id),
+            safe_int(ticket_id),
+            safe_int(work_order_id),
+            safe_int(item_id),
+            final_module_code,
+            final_module_name,
+            safe(serial_no),
+            safe(movement_type) or "receipt",
+            safe(from_status),
+            safe(to_status),
+            float(q2(qty)),
+            final_uom,
+            safe(notes),
+            actor_name_from_request(request),
+        ))
+        entity_id = cur.lastrowid
+        log_ops_event(request, "ops_customer_custody_transaction", safe_int(entity_id), "created", f"{safe(movement_type)} {final_module_name} qty {money(qty)}", conn=conn)
+        conn.commit()
+        notice = "saved"
+    except Exception as exc:
+        conn.rollback()
+        notice = f"Error: {safe(exc)}"
+    finally:
+        conn.close()
+    return RedirectResponse(f"/ui/operations/customer-custody-transactions?notice={quote(notice)}", status_code=303)
 
 
 @router.get("/ui/operations/companies", response_class=HTMLResponse)
