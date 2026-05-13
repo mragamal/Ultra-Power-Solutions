@@ -44,6 +44,26 @@ WORK_ORDER_STATUSES = [
     ("closed", "Closed"),
 ]
 
+WORKFLOW_TYPES = [
+    ("workshop_repair", "Workshop Repair"),
+    ("field_service", "Field Service"),
+    ("planning", "Orange Planning"),
+]
+
+FIELD_ACTION_TYPES = [
+    ("repair", "Repair"),
+    ("technical_visit", "Technical Visit"),
+    ("swap", "Swap"),
+    ("install", "Install"),
+]
+
+ROLLOUT_STATUSES = [
+    ("not_required", "Not Required"),
+    ("pending", "Pending"),
+    ("approved", "Approved"),
+    ("rejected", "Rejected"),
+]
+
 TRIP_STATUSES = [
     ("draft", "Draft"),
     ("dispatched", "Dispatched"),
@@ -312,6 +332,20 @@ def ensure_tables():
             service_price REAL DEFAULT 0,
             technician_incentive REAL DEFAULT 0,
             region_allowance REAL DEFAULT 0,
+            department TEXT DEFAULT 'operation',
+            workflow_type TEXT DEFAULT 'field_service',
+            action_type TEXT,
+            customer_warehouse_id INTEGER,
+            ticket_id INTEGER,
+            requested_qty REAL DEFAULT 0,
+            issued_qty REAL DEFAULT 0,
+            completed_qty REAL DEFAULT 0,
+            returned_qty REAL DEFAULT 0,
+            rollout_status TEXT DEFAULT 'not_required',
+            rollout_notes TEXT,
+            rollout_by TEXT,
+            rollout_at TEXT,
+            actual_actions TEXT,
             status TEXT DEFAULT 'new',
             created_by TEXT,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -518,6 +552,20 @@ def ensure_tables():
     ensure_column(conn, "ops_work_orders", "service_price", "ALTER TABLE ops_work_orders ADD COLUMN service_price REAL DEFAULT 0")
     ensure_column(conn, "ops_work_orders", "technician_incentive", "ALTER TABLE ops_work_orders ADD COLUMN technician_incentive REAL DEFAULT 0")
     ensure_column(conn, "ops_work_orders", "region_allowance", "ALTER TABLE ops_work_orders ADD COLUMN region_allowance REAL DEFAULT 0")
+    ensure_column(conn, "ops_work_orders", "department", "ALTER TABLE ops_work_orders ADD COLUMN department TEXT DEFAULT 'operation'")
+    ensure_column(conn, "ops_work_orders", "workflow_type", "ALTER TABLE ops_work_orders ADD COLUMN workflow_type TEXT DEFAULT 'field_service'")
+    ensure_column(conn, "ops_work_orders", "action_type", "ALTER TABLE ops_work_orders ADD COLUMN action_type TEXT")
+    ensure_column(conn, "ops_work_orders", "customer_warehouse_id", "ALTER TABLE ops_work_orders ADD COLUMN customer_warehouse_id INTEGER")
+    ensure_column(conn, "ops_work_orders", "ticket_id", "ALTER TABLE ops_work_orders ADD COLUMN ticket_id INTEGER")
+    ensure_column(conn, "ops_work_orders", "requested_qty", "ALTER TABLE ops_work_orders ADD COLUMN requested_qty REAL DEFAULT 0")
+    ensure_column(conn, "ops_work_orders", "issued_qty", "ALTER TABLE ops_work_orders ADD COLUMN issued_qty REAL DEFAULT 0")
+    ensure_column(conn, "ops_work_orders", "completed_qty", "ALTER TABLE ops_work_orders ADD COLUMN completed_qty REAL DEFAULT 0")
+    ensure_column(conn, "ops_work_orders", "returned_qty", "ALTER TABLE ops_work_orders ADD COLUMN returned_qty REAL DEFAULT 0")
+    ensure_column(conn, "ops_work_orders", "rollout_status", "ALTER TABLE ops_work_orders ADD COLUMN rollout_status TEXT DEFAULT 'not_required'")
+    ensure_column(conn, "ops_work_orders", "rollout_notes", "ALTER TABLE ops_work_orders ADD COLUMN rollout_notes TEXT")
+    ensure_column(conn, "ops_work_orders", "rollout_by", "ALTER TABLE ops_work_orders ADD COLUMN rollout_by TEXT")
+    ensure_column(conn, "ops_work_orders", "rollout_at", "ALTER TABLE ops_work_orders ADD COLUMN rollout_at TEXT")
+    ensure_column(conn, "ops_work_orders", "actual_actions", "ALTER TABLE ops_work_orders ADD COLUMN actual_actions TEXT")
     ensure_column(conn, "ops_work_orders", "created_by", "ALTER TABLE ops_work_orders ADD COLUMN created_by TEXT")
     ensure_column(conn, "ops_work_orders", "updated_at", "ALTER TABLE ops_work_orders ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
     ensure_column(conn, "ops_work_orders", "completed_at", "ALTER TABLE ops_work_orders ADD COLUMN completed_at TEXT")
@@ -734,6 +782,18 @@ def status_chip(status: str):
     elif state in ["assigned"]:
         color = "blue"
     return f"<span class='status-chip {color}'>{safe(status).replace('_', ' ').title()}</span>"
+
+
+def rollout_status_chip(status: str):
+    state = safe(status).lower() or "not_required"
+    color = "blue"
+    if state == "approved":
+        color = "green"
+    elif state == "rejected":
+        color = "red"
+    elif state == "pending":
+        color = "orange"
+    return f"<span class='status-chip {color}'>{state.replace('_', ' ').title()}</span>"
 
 
 def simple_options(options, selected="", empty_label=""):
@@ -1003,6 +1063,49 @@ def ticket_options(selected_id=0):
     return html
 
 
+def sync_work_order_qty_from_custody(conn, work_order_id, request: Request = None):
+    work_order_id = safe_int(work_order_id)
+    if work_order_id <= 0:
+        return
+    row = conn.execute("SELECT * FROM ops_work_orders WHERE id = ? LIMIT 1", (work_order_id,)).fetchone()
+    if not row:
+        return
+    sums = conn.execute("""
+        SELECT
+            SUM(CASE WHEN movement_type IN ('issue_to_repair', 'site_issue') THEN COALESCE(qty, 0) ELSE 0 END) AS issued_qty,
+            SUM(CASE WHEN movement_type = 'return_from_repair' THEN COALESCE(qty, 0) ELSE 0 END) AS repair_completed_qty,
+            SUM(CASE WHEN movement_type IN ('return_from_repair', 'site_return', 'swap_removed') THEN COALESCE(qty, 0) ELSE 0 END) AS returned_qty
+        FROM ops_customer_custody_transactions
+        WHERE work_order_id = ?
+    """, (work_order_id,)).fetchone()
+    issued_qty = float(sums["issued_qty"] or 0)
+    repair_completed_qty = float(sums["repair_completed_qty"] or 0)
+    returned_qty = float(sums["returned_qty"] or 0)
+    requested_qty = float(row["requested_qty"] or 0)
+    completed_qty = float(row["completed_qty"] or 0)
+    if safe(row["workflow_type"]) == "workshop_repair":
+        completed_qty = repair_completed_qty
+    next_status = safe(row["status"]) or "new"
+    if requested_qty > 0 and completed_qty >= requested_qty:
+        next_status = "closed"
+    elif issued_qty > 0 or completed_qty > 0 or returned_qty > 0:
+        next_status = "in_progress"
+    conn.execute("""
+        UPDATE ops_work_orders
+        SET issued_qty = ?, returned_qty = ?, completed_qty = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (issued_qty, returned_qty, completed_qty, next_status, work_order_id))
+    if request:
+        log_ops_event(
+            request,
+            "ops_work_order",
+            work_order_id,
+            "Progress Sync",
+            f"Issued {money(issued_qty)}, completed {money(completed_qty)}, returned {money(returned_qty)}",
+            conn=conn,
+        )
+
+
 def custody_stock_status_cell(status):
     color = {
         "faulty": "#fee2e2",
@@ -1103,7 +1206,10 @@ def apply_customer_custody_movement(conn, movement_type, company_id, department,
     elif movement == "site_issue":
         adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, from_status or "working", -qty_value, uom, notes)
         adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or "installed", qty_value, uom, notes)
-    elif movement in ["site_return", "swap_removed"]:
+    elif movement == "site_return":
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, from_status or "installed", -qty_value, uom, notes)
+        adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or "working", qty_value, uom, notes)
+    elif movement == "swap_removed":
         adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or "faulty", qty_value, uom, notes)
     elif movement == "adjustment":
         adjust_customer_custody_stock(conn, company_id, department, warehouse_id, item_id, module_code, module_name, serial_no, to_status or from_status or "faulty", qty_value, uom, notes)
@@ -1488,6 +1594,7 @@ def operations_root(request: Request):
         ("Vehicles", "/ui/operations/vehicles", "/static/icons/goods-receipts.svg", "Vehicle master with code, rental office, driver source, and linked rate."),
         ("Rental Offices", "/ui/operations/rental-suppliers", "/static/icons/vendors.svg", "Rental suppliers or car offices that provide vehicles by location."),
         ("Work Orders", "/ui/operations/work-orders", "/static/icons/journal.svg", "Create, assign, track, and review field maintenance and workshop jobs."),
+        ("Workflow Guide", "/ui/operations/workflow-guide", "/static/icons/reports.svg", "Complete operating cycles for workshop repair, field service, and Orange planning."),
         ("Customer Warehouses", "/ui/operations/customer-custody-warehouses", "/static/icons/inventory.svg", "Separate customer custody warehouses by customer department: Operation, Planning, or Repair."),
         ("Customer Stock", "/ui/operations/customer-custody-stock", "/static/icons/inventory.svg", "Operational module balances by customer warehouse and lifecycle status without accounting valuation."),
         ("Custody Movements", "/ui/operations/customer-custody-transactions", "/static/icons/goods-receipts.svg", "Receive, issue, repair-return, swap, and site movement history for customer-owned modules."),
@@ -1536,6 +1643,55 @@ def operations_root(request: Request):
     """
     content = summary + '<div class="card"><h3 class="sub-title">Master Data</h3>' + module_cards(setup_cards) + "</div>" + workflow
     return render_ops_page(request, "Operations", content)
+
+
+@router.get("/ui/operations/workflow-guide", response_class=HTMLResponse)
+def workflow_guide_page(request: Request):
+    html = """
+    <div class="card">
+        <div class="toolbar">
+            <div>
+                <h2 style="margin:0;">Operations Workflow Guide</h2>
+                <div class="section-note">Use the current Operations screens in the same order below. Customer-owned stock is tracking only; company spare parts remain company inventory.</div>
+            </div>
+            <a class="btn gray" href="/ui/operations">Operations</a>
+        </div>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">1. Workshop Repair - Orange Operation</h3>
+        <div class="form-grid">
+            <div class="form-group"><label>Receive Faulty Modules</label><input value="Customer Warehouses -> Custody Movements -> Receive From Customer as Faulty" readonly></div>
+            <div class="form-group"><label>Create Ticket</label><input value="Tickets -> select Orange + fault/site/request details" readonly></div>
+            <div class="form-group"><label>Create Work Order</label><input value="Work Orders -> Workflow Workshop Repair + Orange Operation warehouse + requested qty" readonly></div>
+            <div class="form-group"><label>Issue To Maintenance</label><input value="Open WO -> Issue To Repair; modules become Under Repair" readonly></div>
+            <div class="form-group"><label>Repair And Partial Return</label><input value="Open WO -> Return From Repair; repaired qty becomes Working" readonly></div>
+            <div class="form-group"><label>Progress</label><input value="WO tracks requested, issued, completed, remaining, and activity log" readonly></div>
+        </div>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">2. Field Service - Technical Visit / Swap / Install</h3>
+        <div class="form-grid">
+            <div class="form-group"><label>Open Work Order</label><input value="Ticket -> Work Order -> Workflow Field Service + action repair/swap/install/technical visit" readonly></div>
+            <div class="form-group"><label>Assign Resources</label><input value="Use existing technician, region, trip ticket, vehicle, vehicle rates, technician reports" readonly></div>
+            <div class="form-group"><label>Issue Materials</label><input value="Open WO -> Issue To Site from customer warehouse; shortage later from company warehouse workflow" readonly></div>
+            <div class="form-group"><label>Swap</label><input value="Installed unit becomes Installed; removed faulty unit goes back as Faulty" readonly></div>
+            <div class="form-group"><label>Closure</label><input value="Engineer closes WO with completed qty, actual actions, and notes" readonly></div>
+            <div class="form-group"><label>Incentive</label><input value="Action incentive + region allowance are tracked on the WO and reports" readonly></div>
+        </div>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">3. Orange Planning</h3>
+        <div class="form-grid">
+            <div class="form-group"><label>Project Request</label><input value="Ticket includes site code and job type from the official request" readonly></div>
+            <div class="form-group"><label>Standard Kit</label><input value="Action Catalog materials represent the PM-defined standard kit" readonly></div>
+            <div class="form-group"><label>Planning Warehouse</label><input value="Customer warehouse department Planning is separate from Operation" readonly></div>
+            <div class="form-group"><label>Rollout Approval</label><input value="Open WO -> Rollout Confirm; notes are mandatory before execution" readonly></div>
+            <div class="form-group"><label>Technician Execution</label><input value="Materials are issued to technician, returned to same source, then WO is closed" readonly></div>
+            <div class="form-group"><label>Audit</label><input value="Every movement, approval, and closure is written to Activity Log" readonly></div>
+        </div>
+    </div>
+    """
+    return render_ops_page(request, "Operations Workflow Guide", html)
 
 
 @router.get("/ui/operations/customer-custody-warehouses", response_class=HTMLResponse)
@@ -1748,7 +1904,24 @@ def customer_custody_stock_page(request: Request, company_id: int = 0, departmen
 
 
 @router.get("/ui/operations/customer-custody-transactions", response_class=HTMLResponse)
-def customer_custody_transactions_page(request: Request, notice: str = "", company_id: int = 0, department: str = "", warehouse_id: int = 0):
+def customer_custody_transactions_page(
+    request: Request,
+    notice: str = "",
+    company_id: int = 0,
+    department: str = "",
+    warehouse_id: int = 0,
+    ticket_id: int = 0,
+    work_order_id: int = 0,
+    movement_type: str = "receipt",
+    module_code: str = "",
+    module_name: str = "",
+    serial_no: str = "",
+    from_status: str = "",
+    to_status: str = "faulty",
+    qty: str = "",
+    uom: str = "PCS",
+    notes: str = "",
+):
     conn = get_conn()
     sql = """
         SELECT t.*, c.code AS company_code, c.name AS company_name, w.code AS warehouse_code, w.name AS warehouse_name,
@@ -1811,18 +1984,18 @@ def customer_custody_transactions_page(request: Request, notice: str = "", compa
                 <div class="form-group"><label>Customer</label><select name="company_id" required>{company_options(company_id)}</select></div>
                 <div class="form-group"><label>Department</label><select name="department" required>{simple_options(OPS_DEPARTMENTS, department or 'operation')}</select></div>
                 <div class="form-group"><label>Customer Warehouse</label><select name="warehouse_id" required>{custody_warehouse_options(warehouse_id, company_id, department)}</select></div>
-                <div class="form-group"><label>Movement Type</label><select name="movement_type" required>{simple_options(CUSTODY_MOVEMENT_TYPES, 'receipt')}</select></div>
+                <div class="form-group"><label>Movement Type</label><select name="movement_type" required>{simple_options(CUSTODY_MOVEMENT_TYPES, movement_type or 'receipt')}</select></div>
                 <div class="form-group"><label>Item Master (Optional)</label><select name="item_id">{item_options()}</select></div>
-                <div class="form-group"><label>Module Code</label><input name="module_code"></div>
-                <div class="form-group"><label>Module Name</label><input name="module_name" required></div>
-                <div class="form-group"><label>Serial No</label><input name="serial_no"></div>
-                <div class="form-group"><label>From Status</label><select name="from_status">{simple_options(CUSTOMER_MODULE_STATUSES, 'faulty', "-- No From Status --")}</select></div>
-                <div class="form-group"><label>To Status</label><select name="to_status">{simple_options(CUSTOMER_MODULE_STATUSES, 'faulty')}</select></div>
-                <div class="form-group"><label>Qty</label><input type="number" step="0.01" name="qty" required></div>
-                <div class="form-group"><label>UOM</label><input name="uom" value="PCS"></div>
-                <div class="form-group"><label>Ticket</label><select name="ticket_id">{ticket_options()}</select></div>
-                <div class="form-group"><label>Work Order</label><select name="work_order_id">{work_order_options()}</select></div>
-                <div class="form-group" style="grid-column: span 2;"><label>Notes</label><input name="notes"></div>
+                <div class="form-group"><label>Module Code</label><input name="module_code" value="{safe(module_code)}"></div>
+                <div class="form-group"><label>Module Name</label><input name="module_name" value="{safe(module_name)}" required></div>
+                <div class="form-group"><label>Serial No</label><input name="serial_no" value="{safe(serial_no)}"></div>
+                <div class="form-group"><label>From Status</label><select name="from_status">{simple_options(CUSTOMER_MODULE_STATUSES, from_status or 'faulty', "-- No From Status --")}</select></div>
+                <div class="form-group"><label>To Status</label><select name="to_status">{simple_options(CUSTOMER_MODULE_STATUSES, to_status or 'faulty')}</select></div>
+                <div class="form-group"><label>Qty</label><input type="number" step="0.01" name="qty" value="{safe(qty)}" required></div>
+                <div class="form-group"><label>UOM</label><input name="uom" value="{safe(uom) or 'PCS'}"></div>
+                <div class="form-group"><label>Ticket</label><select name="ticket_id">{ticket_options(ticket_id)}</select></div>
+                <div class="form-group"><label>Work Order</label><select name="work_order_id">{work_order_options(work_order_id)}</select></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Notes</label><input name="notes" value="{safe(notes)}"></div>
             </div>
             <div class="form-actions">
                 <button class="btn green" type="submit">Save Movement</button>
@@ -1913,6 +2086,8 @@ def save_customer_custody_transaction(
         ))
         entity_id = cur.lastrowid
         log_ops_event(request, "ops_customer_custody_transaction", safe_int(entity_id), "created", f"{safe(movement_type)} {final_module_name} qty {money(qty)}", conn=conn)
+        if safe_int(work_order_id) > 0:
+            sync_work_order_qty_from_custody(conn, work_order_id, request)
         conn.commit()
         notice = "saved"
     except Exception as exc:
@@ -3351,6 +3526,18 @@ def work_orders_page(request: Request, edit_id: int = 0, notice: str = ""):
         "fault_type_id": "",
         "service_id": "",
         "region_id": "",
+        "ticket_id": "",
+        "department": "operation",
+        "workflow_type": "field_service",
+        "action_type": "repair",
+        "customer_warehouse_id": "",
+        "requested_qty": "0.00",
+        "issued_qty": "0.00",
+        "completed_qty": "0.00",
+        "returned_qty": "0.00",
+        "rollout_status": "not_required",
+        "rollout_notes": "",
+        "actual_actions": "",
         "request_date": "",
         "site_code": "",
         "site_name": "",
@@ -3368,22 +3555,32 @@ def work_orders_page(request: Request, edit_id: int = 0, notice: str = ""):
     }
     body = ""
     for row in rows:
+        requested_qty = float(row["requested_qty"] or 0)
+        completed_qty = float(row["completed_qty"] or 0)
+        remaining_qty = max(requested_qty - completed_qty, 0)
+        progress = f"{money(completed_qty)} / {money(requested_qty)}"
         body += f"""
         <tr>
             <td>{safe(row['work_order_no'])}</td>
             <td>{safe(row['request_date'])}</td>
             <td>{safe(row['company_name'])}</td>
+            <td>{safe(row['department']).title()}</td>
+            <td>{safe(row['workflow_type']).replace('_', ' ').title()}</td>
             <td>{safe(row['fault_name'])}</td>
             <td>{safe(row['action_name'])}</td>
+            <td>{safe(row['action_type']).replace('_', ' ').title()}</td>
             <td>{safe(row['region_name'])}</td>
             <td>{safe(row['technician_name'])}</td>
-            <td>{money(row['service_price'])}</td>
+            <td>{progress}<br><span class="section-note">Remaining {money(remaining_qty)}</span></td>
             <td>{status_chip(row['status'])}</td>
-            <td><a class="btn blue" href="/ui/operations/work-orders?edit_id={row['id']}">Edit</a></td>
+            <td>
+                <a class="btn blue" href="/ui/operations/work-orders/{row['id']}">Open</a>
+                <a class="btn gray" href="/ui/operations/work-orders?edit_id={row['id']}">Edit</a>
+            </td>
         </tr>
         """
     if not body:
-        body = "<tr><td colspan='10' style='text-align:center;'>No work orders created yet.</td></tr>"
+        body = "<tr><td colspan='13' style='text-align:center;'>No work orders created yet.</td></tr>"
     trip_checked = "checked" if int(form_values.get("trip_required") or 0) == 1 else ""
     html = f"""
     {current_form_notice(notice)}
@@ -3398,8 +3595,13 @@ def work_orders_page(request: Request, edit_id: int = 0, notice: str = ""):
                 <div class="form-group"><label>Work Order No</label><input name="work_order_no" value="{safe(form_values.get('work_order_no'))}" required></div>
                 <div class="form-group"><label>Request Date</label><input type="date" name="request_date" value="{safe(form_values.get('request_date'))}" required></div>
                 <div class="form-group"><label>Company</label><select name="company_id" required>{company_options(form_values.get('company_id'))}</select></div>
+                <div class="form-group"><label>Ticket</label><select name="ticket_id">{ticket_options(form_values.get('ticket_id'))}</select></div>
+                <div class="form-group"><label>Department</label><select name="department" required>{simple_options(OPS_DEPARTMENTS, form_values.get('department') or 'operation')}</select></div>
+                <div class="form-group"><label>Workflow</label><select name="workflow_type" required>{simple_options(WORKFLOW_TYPES, form_values.get('workflow_type') or 'field_service')}</select></div>
                 <div class="form-group"><label>Fault Type</label><select name="fault_type_id">{fault_options(form_values.get('fault_type_id'))}</select></div>
                 <div class="form-group"><label>Action Type</label><select name="service_id">{action_options(form_values.get('service_id'))}</select></div>
+                <div class="form-group"><label>Execution Action</label><select name="action_type">{simple_options(FIELD_ACTION_TYPES, form_values.get('action_type') or 'repair')}</select></div>
+                <div class="form-group"><label>Customer Warehouse</label><select name="customer_warehouse_id">{custody_warehouse_options(form_values.get('customer_warehouse_id'), form_values.get('company_id'), form_values.get('department'))}</select></div>
                 <div class="form-group"><label>Region</label><select name="region_id">{region_options(form_values.get('region_id'))}</select></div>
                 <div class="form-group"><label>Technician</label><select name="technician_id">{employee_options(form_values.get('technician_id'))}</select></div>
                 <div class="form-group"><label>Supervisor</label><select name="manager_id">{employee_options(form_values.get('manager_id'))}</select></div>
@@ -3410,9 +3612,14 @@ def work_orders_page(request: Request, edit_id: int = 0, notice: str = ""):
                 <div class="form-group"><label>Billing Price</label><input name="service_price" value="{safe(form_values.get('service_price'))}"></div>
                 <div class="form-group"><label>Technician Incentive</label><input name="technician_incentive" value="{safe(form_values.get('technician_incentive'))}"></div>
                 <div class="form-group"><label>Region Allowance</label><input name="region_allowance" value="{safe(form_values.get('region_allowance'))}"></div>
+                <div class="form-group"><label>Requested Qty</label><input type="number" step="0.01" name="requested_qty" value="{safe(form_values.get('requested_qty'))}"></div>
+                <div class="form-group"><label>Completed Qty</label><input type="number" step="0.01" name="completed_qty" value="{safe(form_values.get('completed_qty'))}"></div>
+                <div class="form-group"><label>Rollout Status</label><select name="rollout_status">{simple_options(ROLLOUT_STATUSES, form_values.get('rollout_status') or 'not_required')}</select></div>
                 <div class="form-group"><label>Trip Required</label><div style="padding-top:10px;"><label><input type="checkbox" name="trip_required" value="1" {trip_checked}> Needs Trip Ticket</label></div></div>
                 <div class="form-group" style="grid-column: span 2;"><label>Complaint Details</label><input name="complaint_details" value="{safe(form_values.get('complaint_details'))}"></div>
                 <div class="form-group" style="grid-column: span 2;"><label>Required Materials / Notes</label><input name="required_materials" value="{safe(form_values.get('required_materials'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Actual Actions</label><input name="actual_actions" value="{safe(form_values.get('actual_actions'))}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Rollout Notes</label><input name="rollout_notes" value="{safe(form_values.get('rollout_notes'))}"></div>
                 <div class="form-group" style="grid-column: span 2;"><label>Closure Notes</label><input name="closure_notes" value="{safe(form_values.get('closure_notes'))}"></div>
             </div>
             <div class="form-actions">
@@ -3424,7 +3631,7 @@ def work_orders_page(request: Request, edit_id: int = 0, notice: str = ""):
     <div class="card">
         <h3 class="sub-title">Work Order List</h3>
         <table>
-            <tr><th>No</th><th>Date</th><th>Company</th><th>Fault</th><th>Action</th><th>Region</th><th>Technician</th><th>Billing Price</th><th>Status</th><th>Action</th></tr>
+            <tr><th>No</th><th>Date</th><th>Company</th><th>Department</th><th>Workflow</th><th>Fault</th><th>Action</th><th>Execution</th><th>Region</th><th>Technician</th><th>Progress</th><th>Status</th><th>Action</th></tr>
             {body}
         </table>
     </div>
@@ -3443,6 +3650,16 @@ def save_work_order(
     fault_type_id: int = Form(0),
     service_id: int = Form(0),
     region_id: int = Form(0),
+    ticket_id: int = Form(0),
+    department: str = Form("operation"),
+    workflow_type: str = Form("field_service"),
+    action_type: str = Form("repair"),
+    customer_warehouse_id: int = Form(0),
+    requested_qty: str = Form("0"),
+    completed_qty: str = Form("0"),
+    rollout_status: str = Form("not_required"),
+    rollout_notes: str = Form(""),
+    actual_actions: str = Form(""),
     request_date: str = Form(""),
     site_code: str = Form(""),
     site_name: str = Form(""),
@@ -3466,6 +3683,16 @@ def save_work_order(
         safe_int(fault_type_id),
         safe_int(service_id),
         safe_int(region_id),
+        safe_int(ticket_id),
+        safe(department) or "operation",
+        safe(workflow_type) or "field_service",
+        safe(action_type),
+        safe_int(customer_warehouse_id),
+        float(q2(requested_qty)),
+        float(q2(completed_qty)),
+        safe(rollout_status) or "not_required",
+        safe(rollout_notes),
+        safe(actual_actions),
         safe(request_date),
         safe(site_code),
         safe(site_name),
@@ -3485,6 +3712,8 @@ def save_work_order(
         conn.execute("""
             UPDATE ops_work_orders
             SET work_order_no = ?, company_id = ?, fault_type_id = ?, service_id = ?, region_id = ?,
+                ticket_id = ?, department = ?, workflow_type = ?, action_type = ?, customer_warehouse_id = ?,
+                requested_qty = ?, completed_qty = ?, rollout_status = ?, rollout_notes = ?, actual_actions = ?,
                 request_date = ?, site_code = ?, site_name = ?, complaint_details = ?, required_materials = ?,
                 technician_id = ?, manager_id = ?, priority = ?, trip_required = ?, service_price = ?,
                 technician_incentive = ?, region_allowance = ?, status = ?, closure_notes = ?, updated_at = CURRENT_TIMESTAMP
@@ -3495,18 +3724,263 @@ def save_work_order(
     else:
         cur = conn.execute("""
             INSERT INTO ops_work_orders (
-                work_order_no, company_id, fault_type_id, service_id, region_id, request_date,
+                work_order_no, company_id, fault_type_id, service_id, region_id,
+                ticket_id, department, workflow_type, action_type, customer_warehouse_id,
+                requested_qty, completed_qty, rollout_status, rollout_notes, actual_actions,
+                request_date,
                 site_code, site_name, complaint_details, required_materials, technician_id, manager_id,
                 priority, trip_required, service_price, technician_incentive, region_allowance,
                 status, closure_notes, created_by
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, values + (actor_name_from_request(request),))
         log_ops_event(request, "ops_work_order", cur.lastrowid, "Created", f"Work order {safe(work_order_no)}", conn=conn)
         notice = "saved"
     conn.commit()
     conn.close()
     return RedirectResponse(f"/ui/operations/work-orders?notice={notice}", status_code=303)
+
+
+def work_order_movement_link(row, label, movement_type, from_status, to_status, qty=None, notes=""):
+    params = {
+        "company_id": row["company_id"],
+        "department": safe(row["department"]) or "operation",
+        "warehouse_id": row["customer_warehouse_id"],
+        "ticket_id": row["ticket_id"],
+        "work_order_id": row["id"],
+        "movement_type": movement_type,
+        "module_code": "",
+        "module_name": "",
+        "from_status": from_status,
+        "to_status": to_status,
+        "qty": qty if qty is not None else "",
+        "uom": "PCS",
+        "notes": notes or f"{label} for {safe(row['work_order_no'])}",
+    }
+    query = "&".join(f"{key}={quote(safe(value))}" for key, value in params.items() if safe(value) != "")
+    return f"/ui/operations/customer-custody-transactions?{query}"
+
+
+@router.get("/ui/operations/work-orders/{work_order_id}", response_class=HTMLResponse)
+def work_order_detail_page(request: Request, work_order_id: int, notice: str = ""):
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT
+            wo.*,
+            co.code AS company_code,
+            co.name AS company_name,
+            f.name AS fault_name,
+            s.name AS service_name,
+            r.name AS region_name,
+            cw.code AS warehouse_code,
+            cw.name AS warehouse_name,
+            tk.ticket_no,
+            COALESCE(te.employee_name, te.name, te.full_name) AS technician_name,
+            COALESCE(me.employee_name, me.name, me.full_name) AS manager_name
+        FROM ops_work_orders wo
+        LEFT JOIN ops_contract_companies co ON co.id = wo.company_id
+        LEFT JOIN ops_fault_types f ON f.id = wo.fault_type_id
+        LEFT JOIN ops_service_catalog s ON s.id = wo.service_id
+        LEFT JOIN ops_regions r ON r.id = wo.region_id
+        LEFT JOIN ops_customer_custody_warehouses cw ON cw.id = wo.customer_warehouse_id
+        LEFT JOIN ops_tickets tk ON tk.id = wo.ticket_id
+        LEFT JOIN employees te ON te.id = wo.technician_id
+        LEFT JOIN employees me ON me.id = wo.manager_id
+        WHERE wo.id = ?
+        LIMIT 1
+    """, (work_order_id,)).fetchone()
+    if not row:
+        conn.close()
+        return render_ops_page(request, "Work Order", "<div class='card'>Work order not found.</div>")
+
+    movement_rows = conn.execute("""
+        SELECT *
+        FROM ops_customer_custody_transactions
+        WHERE work_order_id = ?
+        ORDER BY transaction_date, id
+    """, (work_order_id,)).fetchall()
+    conn.close()
+
+    requested_qty = float(row["requested_qty"] or 0)
+    issued_qty = float(row["issued_qty"] or 0)
+    completed_qty = float(row["completed_qty"] or 0)
+    returned_qty = float(row["returned_qty"] or 0)
+    remaining_qty = max(requested_qty - completed_qty, 0)
+    warehouse_label = ""
+    if safe(row["warehouse_code"]) or safe(row["warehouse_name"]):
+        warehouse_label = f"{safe(row['warehouse_code'])} - {safe(row['warehouse_name'])}"
+
+    quick_actions = [
+        ("Receive Faulty", "receipt", "", "faulty", requested_qty or "", f"Receive faulty modules for {safe(row['work_order_no'])}"),
+        ("Issue To Repair", "issue_to_repair", "faulty", "under_repair", remaining_qty or "", f"Issue modules to repair for {safe(row['work_order_no'])}"),
+        ("Return From Repair", "return_from_repair", "under_repair", "working", remaining_qty or "", f"Return repaired modules for {safe(row['work_order_no'])}"),
+        ("Issue To Site", "site_issue", "working", "installed", remaining_qty or "", f"Issue working modules to site for {safe(row['work_order_no'])}"),
+        ("Return From Site", "site_return", "installed", "working", "", f"Return unused modules from site for {safe(row['work_order_no'])}"),
+        ("Swap Removed Faulty", "swap_removed", "installed", "faulty", "", f"Removed faulty module from swap for {safe(row['work_order_no'])}"),
+    ]
+    action_buttons = ""
+    if safe_int(row["customer_warehouse_id"]) > 0:
+        for label, movement_type, from_status, to_status, qty, notes in quick_actions:
+            href = work_order_movement_link(row, label, movement_type, from_status, to_status, qty, notes)
+            action_buttons += f"<a class='btn blue' href='{href}'>{label}</a>"
+    else:
+        action_buttons = "<span class='section-note'>Select customer warehouse on the work order to enable custody movements.</span>"
+
+    movement_body = ""
+    for mov in movement_rows:
+        movement_body += f"""
+        <tr>
+            <td>{safe(mov['transaction_no'])}</td>
+            <td>{safe(mov['transaction_date'])}</td>
+            <td>{safe(mov['movement_type']).replace('_', ' ').title()}</td>
+            <td>{safe(mov['module_code'])} {safe(mov['module_name'])}</td>
+            <td>{safe(mov['from_status']).replace('_', ' ').title()} -> {safe(mov['to_status']).replace('_', ' ').title()}</td>
+            <td>{money(mov['qty'])}</td>
+            <td>{safe(mov['notes'])}</td>
+        </tr>
+        """
+    if not movement_body:
+        movement_body = "<tr><td colspan='7' style='text-align:center;'>No custody movements linked yet.</td></tr>"
+
+    rollout_form = f"""
+    <div class="card">
+        <div class="toolbar">
+            <h3 class="sub-title">Rollout Approval</h3>
+            {rollout_status_chip(row['rollout_status'])}
+        </div>
+        <form method="post" action="/ui/operations/work-orders/{row['id']}/rollout-confirm">
+            <div class="form-grid">
+                <div class="form-group" style="grid-column: span 2;">
+                    <label>Rollout Notes</label>
+                    <input name="rollout_notes" value="{safe(row['rollout_notes'])}" required>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">Rollout Confirm</button>
+            </div>
+        </form>
+    </div>
+    """
+
+    html = f"""
+    {current_form_notice(notice)}
+    <div class="card">
+        <div class="toolbar">
+            <div>
+                <h2 style="margin:0;">Work Order {safe(row['work_order_no'])}</h2>
+                <div class="section-note">{safe(row['company_code'])} - {safe(row['company_name'])}</div>
+            </div>
+            <div class="form-actions" style="margin:0;">
+                <a class="btn gray" href="/ui/operations/work-orders">Work Orders</a>
+                <a class="btn blue" href="/ui/operations/work-orders?edit_id={row['id']}">Edit</a>
+            </div>
+        </div>
+        <div class="info-grid">
+            <div><b>Status:</b> {status_chip(row['status'])}</div>
+            <div><b>Workflow:</b> {safe(row['workflow_type']).replace('_', ' ').title()}</div>
+            <div><b>Department:</b> {safe(row['department']).title()}</div>
+            <div><b>Execution:</b> {safe(row['action_type']).replace('_', ' ').title()}</div>
+            <div><b>Ticket:</b> {safe(row['ticket_no'])}</div>
+            <div><b>Fault:</b> {safe(row['fault_name'])}</div>
+            <div><b>Action:</b> {safe(row['service_name'])}</div>
+            <div><b>Region:</b> {safe(row['region_name'])}</div>
+            <div><b>Site:</b> {safe(row['site_code'])} {safe(row['site_name'])}</div>
+            <div><b>Technician:</b> {safe(row['technician_name'])}</div>
+            <div><b>Supervisor:</b> {safe(row['manager_name'])}</div>
+            <div><b>Customer Warehouse:</b> {warehouse_label}</div>
+        </div>
+    </div>
+    <div class="stats-grid">
+        <div class="stat-card"><div class="stat-title">Requested</div><div class="stat-value">{money(requested_qty)}</div></div>
+        <div class="stat-card"><div class="stat-title">Issued</div><div class="stat-value">{money(issued_qty)}</div></div>
+        <div class="stat-card"><div class="stat-title">Completed</div><div class="stat-value">{money(completed_qty)}</div></div>
+        <div class="stat-card"><div class="stat-title">Remaining</div><div class="stat-value">{money(remaining_qty)}</div></div>
+        <div class="stat-card"><div class="stat-title">Returned</div><div class="stat-value">{money(returned_qty)}</div></div>
+    </div>
+    <div class="card">
+        <h3 class="sub-title">Custody Movements</h3>
+        <div class="form-actions">{action_buttons}</div>
+        <table>
+            <tr><th>No</th><th>Date</th><th>Movement</th><th>Module</th><th>Status Flow</th><th>Qty</th><th>Notes</th></tr>
+            {movement_body}
+        </table>
+    </div>
+    {rollout_form}
+    <div class="card">
+        <h3 class="sub-title">Engineer Closure</h3>
+        <form method="post" action="/ui/operations/work-orders/{row['id']}/complete">
+            <div class="form-grid">
+                <div class="form-group"><label>Completed Qty</label><input type="number" step="0.01" name="completed_qty" value="{money(completed_qty)}"></div>
+                <div class="form-group"><label>Actual Actions</label><input name="actual_actions" value="{safe(row['actual_actions'])}"></div>
+                <div class="form-group" style="grid-column: span 2;"><label>Closure Notes</label><input name="closure_notes" value="{safe(row['closure_notes'])}"></div>
+            </div>
+            <div class="form-actions">
+                <button class="btn green" type="submit">Save Progress / Close</button>
+            </div>
+        </form>
+    </div>
+    {render_audit_log_card("ops_work_order", row['id'])}
+    """
+    return render_ops_page(request, f"Work Order {safe(row['work_order_no'])}", html)
+
+
+@router.post("/ui/operations/work-orders/{work_order_id}/rollout-confirm")
+def confirm_work_order_rollout(request: Request, work_order_id: int, rollout_notes: str = Form("")):
+    if not safe(rollout_notes):
+        return RedirectResponse(f"/ui/operations/work-orders/{work_order_id}?notice={quote('Rollout notes are required')}", status_code=303)
+    conn = get_conn()
+    row = conn.execute("SELECT work_order_no FROM ops_work_orders WHERE id = ? LIMIT 1", (work_order_id,)).fetchone()
+    if not row:
+        conn.close()
+        return RedirectResponse("/ui/operations/work-orders?notice=not_found", status_code=303)
+    actor = actor_name_from_request(request)
+    conn.execute("""
+        UPDATE ops_work_orders
+        SET rollout_status = 'approved',
+            rollout_notes = ?,
+            rollout_by = ?,
+            rollout_at = CURRENT_TIMESTAMP,
+            status = CASE WHEN status IN ('new', 'assigned') THEN 'approved' ELSE status END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (safe(rollout_notes), actor, work_order_id))
+    log_ops_event(request, "ops_work_order", work_order_id, "Rollout Approved", f"Rollout approved for {safe(row['work_order_no'])}: {safe(rollout_notes)}", conn=conn)
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/work-orders/{work_order_id}?notice=rollout_approved", status_code=303)
+
+
+@router.post("/ui/operations/work-orders/{work_order_id}/complete")
+def complete_work_order(request: Request, work_order_id: int, completed_qty: str = Form("0"), actual_actions: str = Form(""), closure_notes: str = Form("")):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM ops_work_orders WHERE id = ? LIMIT 1", (work_order_id,)).fetchone()
+    if not row:
+        conn.close()
+        return RedirectResponse("/ui/operations/work-orders?notice=not_found", status_code=303)
+    requested_qty = float(row["requested_qty"] or 0)
+    final_completed_qty = float(q2(completed_qty))
+    next_status = "closed" if requested_qty > 0 and final_completed_qty >= requested_qty else "in_progress"
+    conn.execute("""
+        UPDATE ops_work_orders
+        SET completed_qty = ?,
+            actual_actions = ?,
+            closure_notes = ?,
+            status = ?,
+            completed_at = CASE WHEN ? = 'closed' THEN CURRENT_TIMESTAMP ELSE completed_at END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (final_completed_qty, safe(actual_actions), safe(closure_notes), next_status, next_status, work_order_id))
+    log_ops_event(
+        request,
+        "ops_work_order",
+        work_order_id,
+        "Closure Updated",
+        f"Completed {money(final_completed_qty)} of {money(requested_qty)}. {safe(actual_actions)} {safe(closure_notes)}",
+        conn=conn,
+    )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(f"/ui/operations/work-orders/{work_order_id}?notice=progress_saved", status_code=303)
 
 
 def region_options(selected_id=0):
