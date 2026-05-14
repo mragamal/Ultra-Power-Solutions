@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 
 from audit import actor_name_from_request, render_audit_log_card, safe_log_action
 from db import get_conn
+from i18n import get_lang
 from layout import render_page
 
 try:
@@ -1586,63 +1587,75 @@ def projects_legacy_redirect():
 
 @router.get("/ui/operations", response_class=HTMLResponse)
 def operations_root(request: Request):
+    lang = get_lang(request)
+
+    def label(en, ar):
+        return ar if lang == "ar" else en
+
     setup_cards = [
-        ("Tickets", "/ui/operations/tickets", "/static/icons/journal.svg", "Open customer operational tickets before work order assignment."),
-        ("Contracts", "/ui/operations/contracts", "/static/icons/customers.svg", "Different commercial agreements and pricing methods by company."),
-        ("Pricing Versions", "/ui/operations/pricing-versions", "/static/icons/reports.svg", "Versioned action and vehicle prices by contract and effective date."),
-        ("Trip Tickets", "/ui/operations/trips", "/static/icons/goods-receipts.svg", "Draft, movement, and accounting approval for vehicle trips linked to work orders."),
-        ("Vehicles", "/ui/operations/vehicles", "/static/icons/goods-receipts.svg", "Vehicle master with code, rental office, driver source, and linked rate."),
-        ("Rental Offices", "/ui/operations/rental-suppliers", "/static/icons/vendors.svg", "Rental suppliers or car offices that provide vehicles by location."),
-        ("Work Orders", "/ui/operations/work-orders", "/static/icons/journal.svg", "Create, assign, track, and review field maintenance and workshop jobs."),
-        ("Workflow Guide", "/ui/operations/workflow-guide", "/static/icons/reports.svg", "Complete operating cycles for workshop repair, field service, and Orange planning."),
-        ("Customer Warehouses", "/ui/operations/customer-custody-warehouses", "/static/icons/inventory.svg", "Separate customer custody warehouses by customer department: Operation, Planning, or Repair."),
-        ("Customer Stock", "/ui/operations/customer-custody-stock", "/static/icons/inventory.svg", "Operational module balances by customer warehouse and lifecycle status without accounting valuation."),
-        ("Custody Movements", "/ui/operations/customer-custody-transactions", "/static/icons/goods-receipts.svg", "Receive, issue, repair-return, swap, and site movement history for customer-owned modules."),
-        ("Contract Companies", "/ui/operations/companies", "/static/icons/customers.svg", "Companies that send faults, modules, assemblies, and customer custody stock."),
-        ("Fault Types", "/ui/operations/fault-types", "/static/icons/reports.svg", "Known fault codes used when opening tickets and classifying field issues."),
-        ("Regions", "/ui/operations/regions", "/static/icons/reports.svg", "Zone allowances for field visits and technician bonus by area."),
-        ("Action Catalog", "/ui/operations/action-catalog", "/static/icons/customer-invoices.svg", "Priced actions with import template and fixed raw materials for work order costing."),
-        ("Vehicle Rates", "/ui/operations/vehicle-rates", "/static/icons/goods-receipts.svg", "Kilometer and waiting-hour rates for trip tickets."),
+        (label("Tickets", "التذاكر"), "/ui/operations/tickets", "/static/icons/journal.svg", label("Open customer operational tickets before work order assignment.", "فتح تذاكر تشغيل العميل قبل إنشاء أمر الشغل.")),
+        (label("Contracts", "العقود"), "/ui/operations/contracts", "/static/icons/customers.svg", label("Different commercial agreements and pricing methods by company.", "اتفاقيات وأساليب تسعير مختلفة حسب الشركة.")),
+        (label("Pricing Versions", "إصدارات التسعير"), "/ui/operations/pricing-versions", "/static/icons/reports.svg", label("Versioned action and vehicle prices by contract and effective date.", "أسعار الأعمال والسيارات حسب العقد وتاريخ السريان.")),
+        (label("Trip Tickets", "أوامر الرحلات"), "/ui/operations/trips", "/static/icons/goods-receipts.svg", label("Draft, movement, and accounting approval for vehicle trips linked to work orders.", "مسودات وحركة واعتماد محاسبي لرحلات السيارات المرتبطة بأوامر الشغل.")),
+        (label("Vehicles", "السيارات"), "/ui/operations/vehicles", "/static/icons/goods-receipts.svg", label("Vehicle master with code, rental office, driver source, and linked rate.", "بيانات السيارات مع الكود ومكتب التأجير والسائق والتسعير المرتبط.")),
+        (label("Rental Offices", "مكاتب التأجير"), "/ui/operations/rental-suppliers", "/static/icons/vendors.svg", label("Rental suppliers or car offices that provide vehicles by location.", "موردي أو مكاتب السيارات حسب الموقع.")),
+        (label("Work Orders", "أوامر الشغل"), "/ui/operations/work-orders", "/static/icons/journal.svg", label("Create, assign, track, and review field maintenance and workshop jobs.", "إنشاء وتوزيع ومتابعة ومراجعة أعمال الصيانة والمواقع.")),
+        (label("Workflow Guide", "دليل دورة التشغيل"), "/ui/operations/workflow-guide", "/static/icons/reports.svg", label("Complete operating cycles for workshop repair, field service, and Orange planning.", "دورات التشغيل الكاملة للتصليح والمواقع وتخطيط أورانج.")),
+        (label("Customer Warehouses", "مخازن العميل"), "/ui/operations/customer-custody-warehouses", "/static/icons/warehouses.svg", label("Separate customer custody warehouses by customer department: Operation, Planning, or Repair.", "مخازن عهدة العميل حسب القسم: التشغيل أو التخطيط أو الصيانة.")),
+        (label("Customer Stock", "أرصدة مخازن العميل"), "/ui/operations/customer-custody-stock", "/static/icons/stock-balance.svg", label("Operational module balances by customer warehouse and lifecycle status without accounting valuation.", "أرصدة الموديولات حسب مخزن العميل والحالة بدون تقييم محاسبي.")),
+        (label("Custody Movements", "حركات عهدة العميل"), "/ui/operations/customer-custody-transactions", "/static/icons/stock-ledger.svg", label("Receive, issue, repair-return, swap, and site movement history for customer-owned modules.", "استلام وصرف وإرجاع صيانة وسواب وحركة مواقع للموديولات المملوكة للعميل.")),
+        (label("Contract Companies", "شركات التعاقد"), "/ui/operations/companies", "/static/icons/customers.svg", label("Companies that send faults, modules, assemblies, and customer custody stock.", "الشركات التي ترسل أعطال وموديولات وتجميعات ومخزون عهدة.")),
+        (label("Fault Types", "أنواع الأعطال"), "/ui/operations/fault-types", "/static/icons/reports.svg", label("Known fault codes used when opening tickets and classifying field issues.", "أكواد الأعطال المستخدمة في فتح التذاكر وتصنيف مشاكل المواقع.")),
+        (label("Regions", "المناطق"), "/ui/operations/regions", "/static/icons/reports.svg", label("Zone allowances for field visits and technician bonus by area.", "بدلات المناطق للزيارات وحوافز الفني حسب المنطقة.")),
+        (label("Action Catalog", "كتالوج الأعمال"), "/ui/operations/action-catalog", "/static/icons/customer-invoices.svg", label("Priced actions with import template and fixed raw materials for work order costing.", "الأعمال المسعرة مع قالب الاستيراد والخامات الثابتة لتكلفة أمر الشغل.")),
+        (label("Vehicle Rates", "تسعير السيارات"), "/ui/operations/vehicle-rates", "/static/icons/goods-receipts.svg", label("Kilometer and waiting-hour rates for trip tickets.", "أسعار الكيلومتر وساعات الانتظار لأوامر الرحلات.")),
     ]
+    summary_labels = [
+        (label("Companies", "الشركات"), count_rows('ops_contract_companies')),
+        (label("Contracts", "العقود"), count_rows('ops_contracts')),
+        (label("Tickets", "التذاكر"), count_rows('ops_tickets')),
+        (label("Fault Types", "أنواع الأعطال"), count_rows('ops_fault_types')),
+        (label("Regions", "المناطق"), count_rows('ops_regions')),
+        (label("Actions", "الأعمال"), count_rows('ops_service_catalog')),
+        (label("Rental Offices", "مكاتب التأجير"), count_rows('ops_rental_suppliers')),
+        (label("Vehicles", "السيارات"), count_rows('ops_vehicles')),
+        (label("Vehicle Rates", "تسعير السيارات"), count_rows('ops_vehicle_rates')),
+        (label("Trips", "الرحلات"), count_rows('ops_trip_tickets')),
+        (label("Work Orders", "أوامر الشغل"), count_rows('ops_work_orders')),
+        (label("Customer Warehouses", "مخازن العميل"), count_rows('ops_customer_custody_warehouses')),
+        (label("Custody Movements", "حركات العهدة"), count_rows('ops_customer_custody_transactions')),
+    ]
+    summary_pills = "".join(
+        f'<span class="summary-pill">{title}: {value}</span>'
+        for title, value in summary_labels
+    )
     summary = f"""
     <div class="card">
         <div class="toolbar">
             <div>
-                <h2 style="margin:0;">Operations</h2>
-                <div class="section-note">Field maintenance, workshop repairs, cabinet assembly, and customer custody stock in one workflow.</div>
+                <h2 style="margin:0;">{label("Operations", "التشغيل")}</h2>
+                <div class="section-note">{label("Field maintenance, workshop repairs, cabinet assembly, and customer custody stock in one workflow.", "صيانة المواقع وتصليح الورشة وتجميع الكابينت ومخزون عهدة العميل في دورة تشغيل واحدة.")}</div>
             </div>
             <div class="table-summary">
-                <span class="summary-pill">Companies: {count_rows('ops_contract_companies')}</span>
-                <span class="summary-pill">Contracts: {count_rows('ops_contracts')}</span>
-                <span class="summary-pill">Tickets: {count_rows('ops_tickets')}</span>
-                <span class="summary-pill">Fault Types: {count_rows('ops_fault_types')}</span>
-                <span class="summary-pill">Regions: {count_rows('ops_regions')}</span>
-                <span class="summary-pill">Actions: {count_rows('ops_service_catalog')}</span>
-                <span class="summary-pill">Rental Offices: {count_rows('ops_rental_suppliers')}</span>
-                <span class="summary-pill">Vehicles: {count_rows('ops_vehicles')}</span>
-                <span class="summary-pill">Vehicle Rates: {count_rows('ops_vehicle_rates')}</span>
-                <span class="summary-pill">Trips: {count_rows('ops_trip_tickets')}</span>
-                <span class="summary-pill">Work Orders: {count_rows('ops_work_orders')}</span>
-                <span class="summary-pill">Customer Warehouses: {count_rows('ops_customer_custody_warehouses')}</span>
-                <span class="summary-pill">Custody Movements: {count_rows('ops_customer_custody_transactions')}</span>
+                {summary_pills}
             </div>
         </div>
     </div>
     """
-    workflow = """
+    workflow = f"""
     <div class="card">
-        <h3 class="sub-title">Operational Flow</h3>
-        <div class="section-note">Trip workflow is now live first: draft by technical manager, completion by movement manager, and final approval by accounting before transport cost is distributed.</div>
+        <h3 class="sub-title">{label("Operational Flow", "دورة التشغيل")}</h3>
+        <div class="section-note">{label("Trip workflow is now live first: draft by technical manager, completion by movement manager, and final approval by accounting before transport cost is distributed.", "دورة الرحلات تعمل حاليا: مسودة من المدير الفني، إتمام من مسؤول الحركة، واعتماد محاسبي قبل توزيع تكلفة النقل.")}</div>
         <div class="form-grid">
-            <div class="form-group"><label>Field Maintenance</label><input value="Ticket -> Work Order -> Trip Ticket -> Technician Report -> Manager Review -> Invoice" readonly></div>
-            <div class="form-group"><label>Workshop Repairs</label><input value="Customer Intake -> Repair Order -> Parts Usage -> Test -> Return to Customer" readonly></div>
-            <div class="form-group"><label>Cabinet Assembly</label><input value="Assembly Request -> Components -> Build -> Completion -> Delivery" readonly></div>
-            <div class="form-group"><label>Customer Custody</label><input value="Custody Receipt -> Issue to Work Order -> Balance Statement by Customer" readonly></div>
+            <div class="form-group"><label>{label("Field Maintenance", "صيانة المواقع")}</label><input value="{label("Ticket -> Work Order -> Trip Ticket -> Technician Report -> Manager Review -> Invoice", "تذكرة -> أمر شغل -> أمر رحلة -> تقرير فني -> مراجعة مدير -> فاتورة")}" readonly></div>
+            <div class="form-group"><label>{label("Workshop Repairs", "تصليح الورشة")}</label><input value="{label("Customer Intake -> Repair Order -> Parts Usage -> Test -> Return to Customer", "استلام من العميل -> أمر صيانة -> صرف قطع -> اختبار -> رجوع للعميل")}" readonly></div>
+            <div class="form-group"><label>{label("Cabinet Assembly", "تجميع الكابينت")}</label><input value="{label("Assembly Request -> Components -> Build -> Completion -> Delivery", "طلب تجميع -> مكونات -> تصنيع -> إنهاء -> تسليم")}" readonly></div>
+            <div class="form-group"><label>{label("Customer Custody", "عهدة العميل")}</label><input value="{label("Custody Receipt -> Issue to Work Order -> Balance Statement by Customer", "استلام عهدة -> صرف لأمر شغل -> كشف رصيد حسب العميل")}" readonly></div>
         </div>
     </div>
     """
-    content = summary + '<div class="card"><h3 class="sub-title">Master Data</h3>' + module_cards(setup_cards) + "</div>" + workflow
-    return render_ops_page(request, "Operations", content)
+    content = summary + f'<div class="card"><h3 class="sub-title">{label("Master Data", "البيانات الأساسية")}</h3>' + module_cards(setup_cards) + "</div>" + workflow
+    return render_ops_page(request, label("Operations", "التشغيل"), content)
 
 
 @router.get("/ui/operations/workflow-guide", response_class=HTMLResponse)
