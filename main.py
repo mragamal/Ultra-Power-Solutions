@@ -14,7 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from auth import can, current_user, default_home_path_for_user, is_logged_in
 from audit import safe_log_request_action
 from db import init_db
-from i18n import get_lang
+from i18n import fix_mojibake, get_lang
 from layout import render_page
 
 init_db()
@@ -297,15 +297,9 @@ def card_section(title, cards):
     """
 
 
-def looks_mojibake(text: str) -> bool:
-    text = str(text or "")
-    markers = ("ط§", "ظ„", "ظ…", "ط¨", "ط©", "ط±", "ط£", "ط¥", "ظٹ", "ظˆ", "ط¹", "ط،", "طŒ")
-    return any(marker in text for marker in markers)
-
-
 def t(lang: str, en: str, ar: str) -> str:
-    if lang == "ar" and not looks_mojibake(ar):
-        return ar
+    if lang == "ar":
+        return fix_mojibake(ar) or ar or en
     return en
 
 
@@ -732,22 +726,22 @@ def assistant_greeting_reply(lang: str):
 def assistant_action_steps(action, lang: str):
     if lang == "ar" and action["href"] in AR_ASSISTANT_TEXT:
         return AR_ASSISTANT_TEXT[action["href"]]["steps"]
-    if lang == "ar" and not any(looks_mojibake(step) for step in action.get("ar_steps", [])):
-        return action["ar_steps"]
+    if lang == "ar":
+        return [fix_mojibake(step) for step in action.get("ar_steps", [])]
     return action["steps"]
 
 
 def assistant_action_title(action, lang: str):
     if lang == "ar" and action["href"] in AR_ASSISTANT_TEXT:
         return AR_ASSISTANT_TEXT[action["href"]]["title"]
-    if lang == "ar" and not looks_mojibake(action.get("ar_title", "")):
-        return action["ar_title"]
+    if lang == "ar":
+        return fix_mojibake(action.get("ar_title", "")) or action["title"]
     return action["title"]
 
 
 def assistant_card(action, lang: str, query: str = ""):
     title = assistant_action_title(action, lang)
-    steps = action["ar_steps"] if lang == "ar" else action["steps"]
+    steps = assistant_action_steps(action, lang)
     step_html = "".join(f"<li>{escape(step)}</li>" for step in steps)
     go_href = f"/ui/assistant/go?q={quote_plus(query)}" if query else action["href"]
     return f"""

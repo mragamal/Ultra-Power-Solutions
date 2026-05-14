@@ -1,10 +1,10 @@
 import inspect
 import json
-import re
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from auth import can
+from i18n import fix_mojibake
 
 
 _I18N_JS_PATH = Path(__file__).resolve().parent / "static" / "js" / "i18n.js"
@@ -22,22 +22,8 @@ _NAV_LABELS_AR = {
 }
 
 
-_MOJIBAKE_AR_RE = re.compile(r"[\u00a0-\u00ff\u0600-\u06ff\u201a-\u201e\u2020-\u2026\u02c6\u2030]+")
-
-
 def _repair_arabic_mojibake(text):
-    if not isinstance(text, str) or not text:
-        return text
-
-    def fix_match(match):
-        value = match.group(0)
-        try:
-            fixed = value.encode("cp1256").decode("utf-8")
-        except Exception:
-            return value
-        return fixed if fixed else value
-
-    return _MOJIBAKE_AR_RE.sub(fix_match, text)
+    return fix_mojibake(text)
 
 
 def _request_lang(request, fallback="en"):
