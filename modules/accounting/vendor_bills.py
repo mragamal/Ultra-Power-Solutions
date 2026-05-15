@@ -603,30 +603,6 @@ def available_vendor_cash_payments(conn, vendor_id: int):
             label = f"{safe(row['voucher_no'])} | {safe(row['voucher_date'])} | Cash Payment | Available {money(unapplied)}"
             result.append(("cash_payment", row, unapplied, label))
 
-    opening_rows = conn.execute(
-        """
-        SELECT
-            l.id,
-            j.entry_date,
-            j.entry_no,
-            j.reference,
-            COALESCE(NULLIF(l.line_description,''), NULLIF(j.description,''), '') AS description
-        FROM journal_lines l
-        JOIN journal_entries j ON j.id = l.journal_id
-        WHERE LOWER(COALESCE(j.status,'')) = 'posted'
-          AND LOWER(COALESCE(l.partner_type,'')) = 'vendor'
-          AND COALESCE(l.partner_id, 0) = ?
-          AND COALESCE(l.debit, 0) > COALESCE(l.credit, 0)
-        ORDER BY j.entry_date DESC, j.id DESC, COALESCE(l.line_no,0), l.id DESC
-        """,
-        (vendor_id,),
-    ).fetchall()
-    for row in opening_rows:
-        unapplied = get_payment_unallocated_amount(conn, "vendor_opening_journal", row["id"])
-        if unapplied > Decimal("0.00"):
-            label = f"{safe(row['entry_no'])} | {safe(row['entry_date'])} | Opening Journal | Available {money(unapplied)}"
-            result.append(("vendor_opening_journal", row, unapplied, label))
-
     return result
 
 
@@ -2353,6 +2329,8 @@ async def allocate_vendor_cash_payment(request: Request, row_id: int):
     allocated_amount = to_decimal(form.get("allocated_amount"), "0")
     conn = get_conn()
     try:
+        if payment_type != "cash_payment":
+            raise Exception("Only cash payment vouchers can be allocated to vendor bills from this screen")
         row = conn.execute("SELECT * FROM vendor_bills WHERE id = ? LIMIT 1", (row_id,)).fetchone()
         if not row:
             raise Exception("Vendor bill not found")
