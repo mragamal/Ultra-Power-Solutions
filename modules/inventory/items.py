@@ -38,6 +38,16 @@ def to_int_flag(value, default=1):
         return int(default)
 
 
+def to_float(value, default=0.0):
+    try:
+        text = safe(value).replace(",", "")
+        if text == "":
+            return float(default)
+        return float(text)
+    except Exception:
+        return float(default)
+
+
 def next_item_code_from_conn(conn):
     row = conn.execute(
         """
@@ -110,6 +120,8 @@ def normalize_import_row(row):
         "category": get_header_value(row, ["category", "item_category"]),
         "uom": get_header_value(row, ["uom", "unit", "unit_of_measure", "unit of measure"]) or "Unit",
         "item_type": get_header_value(row, ["item_type", "type"]) or "stock_item",
+        "standard_cost": get_header_value(row, ["standard_cost", "cost", "unit_cost", "standard cost"]) or "0",
+        "sale_price": get_header_value(row, ["sale_price", "price", "selling_price", "sale price"]) or "0",
         "is_active": get_header_value(row, ["is_active", "active", "status"]) or "1",
     }
 
@@ -185,13 +197,15 @@ def items_list(request: Request):
             <td>{r['category'] or ''}</td>
             <td>{r['uom'] or ''}</td>
             <td>{r['item_type'] or ''}</td>
+            <td style="text-align:right;">{to_float(r['standard_cost']):,.2f}</td>
+            <td style="text-align:right;">{to_float(r['sale_price']):,.2f}</td>
             <td>{active}</td>
             <td><a class="btn gray" href="/ui/inventory/items/{r['id']}/edit">Edit</a></td>
         </tr>
         """
 
     if not body:
-        body = "<tr><td colspan='7' style='text-align:center;'>No items found.</td></tr>"
+        body = "<tr><td colspan='9' style='text-align:center;'>No items found.</td></tr>"
 
     html = f"""
     <div class="card">
@@ -226,6 +240,8 @@ def items_list(request: Request):
                 <th>Category</th>
                 <th>UOM</th>
                 <th>Type</th>
+                <th style="text-align:right;">Cost</th>
+                <th style="text-align:right;">Sale Price</th>
                 <th>Active</th>
                 <th>Actions</th>
             </tr>
@@ -280,6 +296,17 @@ def item_form_html(action, data=None):
                     </select>
                 </div>
                 <div class="col">
+                    <label>Standard Cost</label>
+                    <input name="standard_cost" type="number" step="0.01" value="{data.get('standard_cost') or '0'}">
+                </div>
+            </div>
+
+            <div class="row" style="margin-top:14px;">
+                <div class="col">
+                    <label>Sale Price</label>
+                    <input name="sale_price" type="number" step="0.01" value="{data.get('sale_price') or '0'}">
+                </div>
+                <div class="col">
                     <label>Active</label>
                     <select name="is_active">
                         <option value="1" {selected_yes}>Yes</option>
@@ -309,14 +336,16 @@ def item_create(
     category: str = Form(""),
     uom: str = Form("Unit"),
     item_type: str = Form("stock_item"),
+    standard_cost: str = Form("0"),
+    sale_price: str = Form("0"),
     is_active: int = Form(1),
 ):
     conn = get_conn()
     ensure_uom_exists_in_conn(conn, safe(uom) or "Unit")
     conn.execute(
         """
-        INSERT INTO items (code, name, category, uom, item_type, is_active)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO items (code, name, category, uom, item_type, standard_cost, sale_price, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             safe(code) or next_item_code(),
@@ -324,6 +353,8 @@ def item_create(
             safe(category),
             safe(uom) or "Unit",
             safe(item_type) or "stock_item",
+            to_float(standard_cost),
+            to_float(sale_price),
             int(is_active or 0),
         ),
     )
@@ -356,6 +387,8 @@ def item_update(
     category: str = Form(""),
     uom: str = Form("Unit"),
     item_type: str = Form("stock_item"),
+    standard_cost: str = Form("0"),
+    sale_price: str = Form("0"),
     is_active: int = Form(1),
 ):
     conn = get_conn()
@@ -363,7 +396,7 @@ def item_update(
     conn.execute(
         """
         UPDATE items
-        SET code = ?, name = ?, category = ?, uom = ?, item_type = ?, is_active = ?
+        SET code = ?, name = ?, category = ?, uom = ?, item_type = ?, standard_cost = ?, sale_price = ?, is_active = ?
         WHERE id = ?
         """,
         (
@@ -372,6 +405,8 @@ def item_update(
             safe(category),
             safe(uom) or "Unit",
             safe(item_type) or "stock_item",
+            to_float(standard_cost),
+            to_float(sale_price),
             int(is_active or 0),
             item_id,
         ),
@@ -383,11 +418,11 @@ def item_update(
 
 @router.get("/ui/inventory/items/template.csv")
 def items_template_csv():
-    headers = ["code", "name", "category", "uom", "item_type", "is_active"]
+    headers = ["code", "name", "category", "uom", "item_type", "standard_cost", "sale_price", "is_active"]
     rows = [
-        ["ITM-0001", "Printer Paper A4", "Stationery", "Pack", "stock_item", "1"],
-        ["ITM-0002", "Mouse", "IT", "Piece", "stock_item", "1"],
-        ["ITM-0003", "Installation Service", "Services", "Unit", "service", "1"],
+        ["ITM-0001", "Printer Paper A4", "Stationery", "Pack", "stock_item", "150.00", "180.00", "1"],
+        ["ITM-0002", "Mouse", "IT", "Piece", "stock_item", "250.00", "300.00", "1"],
+        ["ITM-0003", "Installation Service", "Services", "Unit", "service", "0.00", "500.00", "1"],
     ]
     output = io.StringIO()
     writer = csv.writer(output)
@@ -410,10 +445,10 @@ def items_template_xlsx():
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Items Template"
-    sheet.append(["code", "name", "category", "uom", "item_type", "is_active"])
-    sheet.append(["ITM-0001", "Printer Paper A4", "Stationery", "Pack", "stock_item", "1"])
-    sheet.append(["ITM-0002", "Mouse", "IT", "Piece", "stock_item", "1"])
-    sheet.append(["ITM-0003", "Installation Service", "Services", "Unit", "service", "1"])
+    sheet.append(["code", "name", "category", "uom", "item_type", "standard_cost", "sale_price", "is_active"])
+    sheet.append(["ITM-0001", "Printer Paper A4", "Stationery", "Pack", "stock_item", "150.00", "180.00", "1"])
+    sheet.append(["ITM-0002", "Mouse", "IT", "Piece", "stock_item", "250.00", "300.00", "1"])
+    sheet.append(["ITM-0003", "Installation Service", "Services", "Unit", "service", "0.00", "500.00", "1"])
 
     uom_sheet = workbook.create_sheet("UOMs")
     uom_sheet.append(["uom_name"])
@@ -479,6 +514,8 @@ async def items_import(file: UploadFile = File(...)):
             item_type = safe(row["item_type"]) or "stock_item"
             if item_type not in ("stock_item", "service"):
                 item_type = "stock_item"
+            standard_cost = to_float(row["standard_cost"])
+            sale_price = to_float(row["sale_price"])
             is_active = to_int_flag(row["is_active"], default=1)
 
             ensure_uom_exists_in_conn(conn, uom)
@@ -497,19 +534,19 @@ async def items_import(file: UploadFile = File(...)):
                 conn.execute(
                     """
                     UPDATE items
-                    SET name = ?, category = ?, uom = ?, item_type = ?, is_active = ?
+                    SET name = ?, category = ?, uom = ?, item_type = ?, standard_cost = ?, sale_price = ?, is_active = ?
                     WHERE id = ?
                     """,
-                    (name, category, uom, item_type, is_active, exists["id"]),
+                    (name, category, uom, item_type, standard_cost, sale_price, is_active, exists["id"]),
                 )
                 updated += 1
             else:
                 conn.execute(
                     """
-                    INSERT INTO items (code, name, category, uom, item_type, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO items (code, name, category, uom, item_type, standard_cost, sale_price, is_active)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (code, name, category, uom, item_type, is_active),
+                    (code, name, category, uom, item_type, standard_cost, sale_price, is_active),
                 )
                 imported += 1
 

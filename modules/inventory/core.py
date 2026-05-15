@@ -50,6 +50,8 @@ def ensure_inventory_tables():
             category TEXT,
             uom TEXT DEFAULT 'Unit',
             item_type TEXT DEFAULT 'stock_item',
+            standard_cost REAL DEFAULT 0,
+            sale_price REAL DEFAULT 0,
             is_active INTEGER DEFAULT 1,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -100,11 +102,41 @@ def ensure_inventory_tables():
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inventory_material_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_no TEXT UNIQUE,
+            issue_date TEXT,
+            work_order_id INTEGER,
+            warehouse_id INTEGER,
+            notes TEXT,
+            created_by TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inventory_material_issue_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id INTEGER,
+            item_id INTEGER,
+            qty REAL DEFAULT 0,
+            unit_cost REAL DEFAULT 0,
+            description TEXT
+        )
+        """
+    )
+
     ensure_column(conn, "items", "code", "ALTER TABLE items ADD COLUMN code TEXT")
     ensure_column(conn, "items", "name", "ALTER TABLE items ADD COLUMN name TEXT")
     ensure_column(conn, "items", "category", "ALTER TABLE items ADD COLUMN category TEXT")
     ensure_column(conn, "items", "uom", "ALTER TABLE items ADD COLUMN uom TEXT DEFAULT 'Unit'")
     ensure_column(conn, "items", "item_type", "ALTER TABLE items ADD COLUMN item_type TEXT DEFAULT 'stock_item'")
+    ensure_column(conn, "items", "standard_cost", "ALTER TABLE items ADD COLUMN standard_cost REAL DEFAULT 0")
+    ensure_column(conn, "items", "sale_price", "ALTER TABLE items ADD COLUMN sale_price REAL DEFAULT 0")
     ensure_column(conn, "items", "is_active", "ALTER TABLE items ADD COLUMN is_active INTEGER DEFAULT 1")
     ensure_column(conn, "items", "created_at", "ALTER TABLE items ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
 
@@ -130,6 +162,20 @@ def ensure_inventory_tables():
     ensure_column(conn, "inventory_uoms", "code", "ALTER TABLE inventory_uoms ADD COLUMN code TEXT")
     ensure_column(conn, "inventory_uoms", "name", "ALTER TABLE inventory_uoms ADD COLUMN name TEXT")
     ensure_column(conn, "inventory_uoms", "is_active", "ALTER TABLE inventory_uoms ADD COLUMN is_active INTEGER DEFAULT 1")
+
+    ensure_column(conn, "inventory_material_issues", "issue_no", "ALTER TABLE inventory_material_issues ADD COLUMN issue_no TEXT")
+    ensure_column(conn, "inventory_material_issues", "issue_date", "ALTER TABLE inventory_material_issues ADD COLUMN issue_date TEXT")
+    ensure_column(conn, "inventory_material_issues", "work_order_id", "ALTER TABLE inventory_material_issues ADD COLUMN work_order_id INTEGER")
+    ensure_column(conn, "inventory_material_issues", "warehouse_id", "ALTER TABLE inventory_material_issues ADD COLUMN warehouse_id INTEGER")
+    ensure_column(conn, "inventory_material_issues", "notes", "ALTER TABLE inventory_material_issues ADD COLUMN notes TEXT")
+    ensure_column(conn, "inventory_material_issues", "created_by", "ALTER TABLE inventory_material_issues ADD COLUMN created_by TEXT")
+    ensure_column(conn, "inventory_material_issues", "created_at", "ALTER TABLE inventory_material_issues ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
+
+    ensure_column(conn, "inventory_material_issue_lines", "issue_id", "ALTER TABLE inventory_material_issue_lines ADD COLUMN issue_id INTEGER")
+    ensure_column(conn, "inventory_material_issue_lines", "item_id", "ALTER TABLE inventory_material_issue_lines ADD COLUMN item_id INTEGER")
+    ensure_column(conn, "inventory_material_issue_lines", "qty", "ALTER TABLE inventory_material_issue_lines ADD COLUMN qty REAL DEFAULT 0")
+    ensure_column(conn, "inventory_material_issue_lines", "unit_cost", "ALTER TABLE inventory_material_issue_lines ADD COLUMN unit_cost REAL DEFAULT 0")
+    ensure_column(conn, "inventory_material_issue_lines", "description", "ALTER TABLE inventory_material_issue_lines ADD COLUMN description TEXT")
 
     default_uoms = [
         ("UNIT", "Unit"),
@@ -280,6 +326,34 @@ def next_warehouse_code():
     return f"WH-{num + 1:04d}"
 
 
+def next_material_issue_no(conn=None):
+    own_conn = conn is None
+    if conn is None:
+        conn = get_conn()
+
+    row = conn.execute(
+        """
+        SELECT issue_no
+        FROM inventory_material_issues
+        WHERE COALESCE(issue_no, '') <> ''
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    if own_conn:
+        conn.close()
+
+    last = safe(row["issue_no"]) if row else ""
+    if not last:
+        return "MI-0001"
+    try:
+        num = int(last.split("-")[-1])
+    except Exception:
+        num = 0
+    return f"MI-{num + 1:04d}"
+
+
 def item_display(conn, item_id):
     if not item_id or not table_exists(conn, "items"):
         return ""
@@ -359,6 +433,24 @@ def record_stock_movement(
     )
 
 
+def item_standard_cost(conn, item_id):
+    if not item_id:
+        return 0.0
+    row = conn.execute(
+        """
+        SELECT standard_cost
+        FROM items
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (item_id,),
+    ).fetchone()
+    try:
+        return float(row["standard_cost"] or 0) if row else 0.0
+    except Exception:
+        return 0.0
+
+
 def sync_goods_receipts_to_stock():
     conn = get_conn()
     if not table_exists(conn, "goods_receipts") or not table_exists(conn, "goods_receipt_lines"):
@@ -428,7 +520,11 @@ def stock_balance_rows(item_id=None, warehouse_id=None):
             sl.warehouse_id,
             w.code AS warehouse_code,
             w.name AS warehouse_name,
-            SUM(COALESCE(sl.qty_in, 0) - COALESCE(sl.qty_out, 0)) AS balance_qty
+            SUM(COALESCE(sl.qty_in, 0) - COALESCE(sl.qty_out, 0)) AS balance_qty,
+            SUM(
+                (COALESCE(sl.qty_in, 0) - COALESCE(sl.qty_out, 0))
+                * COALESCE(NULLIF(sl.unit_cost, 0), i.standard_cost, 0)
+            ) AS stock_value
         FROM stock_ledger sl
         LEFT JOIN items i ON i.id = sl.item_id
         LEFT JOIN warehouses w ON w.id = sl.warehouse_id

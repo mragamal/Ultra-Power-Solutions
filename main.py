@@ -1027,6 +1027,7 @@ def inventory_root():
         ("Goods Receipts", "/ui/inventory/goods-receipts", "/static/icons/goods-receipts.svg", "Receiving and stock intake"),
         ("Stock Balance", "/ui/inventory/stock-balance", "/static/icons/stock-balance.svg", "Current stock by item and warehouse"),
         ("Stock Ledger", "/ui/inventory/stock-ledger", "/static/icons/stock-ledger.svg", "Detailed inventory movement history"),
+        ("Material Issues", "/ui/inventory/material-issues", "/static/icons/stock-ledger.svg", "Issue company materials to work orders"),
     ]
     content = card_section("Inventory", inventory_cards)
     return HTMLResponse(render_page("Inventory", content, current_path="/ui/inventory"))

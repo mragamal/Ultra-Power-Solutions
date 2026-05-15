@@ -3885,6 +3885,7 @@ def work_order_detail_page(request: Request, work_order_id: int, notice: str = "
             </div>
             <div class="form-actions" style="margin:0;">
                 <a class="btn gray" href="/ui/operations/work-orders">Work Orders</a>
+                <a class="btn green" href="/ui/inventory/material-issues/new?work_order_id={row['id']}">Issue Company Materials</a>
                 <a class="btn blue" href="/ui/operations/work-orders?edit_id={row['id']}">Edit</a>
             </div>
         </div>
