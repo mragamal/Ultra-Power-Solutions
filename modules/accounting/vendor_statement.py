@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse
 
 from db import get_conn
 from layout import render_page
+from modules.accounting.config import get_setting_value
 
 router = APIRouter()
 
@@ -74,12 +75,20 @@ def get_vendor_row(conn, vendor_id: int):
     """, (vendor_id,)).fetchone()
 
 
+def get_vendor_account_code(conn, vendor_id: int):
+    vendor = get_vendor_row(conn, vendor_id)
+    if vendor and "account_code" in vendor.keys() and safe(vendor["account_code"]):
+        return safe(vendor["account_code"])
+    return safe(get_setting_value("vendor_control_account", get_setting_value("default_vendor_account", "211100")))
+
+
 # =========================================================
 # DATA BUILDERS
 # =========================================================
 def get_vendor_opening_journal_balance(conn, vendor_id: int, date_from: str = ""):
     if not date_from:
         return Decimal("0.00")
+    vendor_account_code = get_vendor_account_code(conn, vendor_id)
     row = conn.execute("""
         SELECT
             COALESCE(SUM(l.debit), 0) AS total_debit,
@@ -89,8 +98,9 @@ def get_vendor_opening_journal_balance(conn, vendor_id: int, date_from: str = ""
         WHERE LOWER(COALESCE(j.status,'')) = 'posted'
           AND LOWER(COALESCE(l.partner_type,'')) = 'vendor'
           AND COALESCE(l.partner_id, 0) = ?
+          AND COALESCE(l.account_code, '') = ?
           AND COALESCE(j.entry_date,'') < ?
-    """, (vendor_id, date_from)).fetchone()
+    """, (vendor_id, vendor_account_code, date_from)).fetchone()
     total_credit = Decimal(str(row["total_credit"] if row else 0))
     total_debit = Decimal(str(row["total_debit"] if row else 0))
     return (total_credit - total_debit).quantize(Decimal("1.00"), rounding=ROUND_HALF_UP)
@@ -100,6 +110,7 @@ def get_vendor_statement_rows(conn, vendor_id: int, date_from: str = "", date_to
     vendor = get_vendor_row(conn, vendor_id)
     if not vendor:
         return None, [], Decimal("0.00"), Decimal("0.00"), Decimal("0.00")
+    vendor_account_code = get_vendor_account_code(conn, vendor_id)
 
     rows = []
 
@@ -117,8 +128,9 @@ def get_vendor_statement_rows(conn, vendor_id: int, date_from: str = "", date_to
         WHERE LOWER(COALESCE(j.status,'')) = 'posted'
           AND LOWER(COALESCE(l.partner_type,'')) = 'vendor'
           AND COALESCE(l.partner_id, 0) = ?
+          AND COALESCE(l.account_code, '') = ?
     """
-    params = [vendor_id]
+    params = [vendor_id, vendor_account_code]
     if date_from:
         sql += " AND COALESCE(j.entry_date, '') >= ?"
         params.append(date_from)
