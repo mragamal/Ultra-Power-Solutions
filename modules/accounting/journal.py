@@ -2,6 +2,7 @@
 from io import BytesIO
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta
+import re
 
 import openpyxl
 from fastapi import APIRouter, File, Request, UploadFile
@@ -189,64 +190,97 @@ def _normalize_lookup_text(value: str) -> str:
     return text
 
 
+def _partner_lookup_candidates(value: str) -> list[str]:
+    raw = safe(value)
+    if not raw:
+        return []
+
+    candidates = [raw]
+    match = re.search(r"\b(?:EMP|CUST|VEND)-\d+\b", raw, flags=re.IGNORECASE)
+    if match:
+        candidates.append(match.group(0))
+
+    if "|" in raw:
+        candidates.extend(part.strip() for part in raw.split("|") if part.strip())
+    if " - " in raw:
+        candidates.extend(part.strip() for part in raw.split(" - ") if part.strip())
+
+    seen = set()
+    clean = []
+    for candidate in candidates:
+        key = _normalize_lookup_text(candidate)
+        if key and key not in seen:
+            seen.add(key)
+            clean.append(candidate)
+    return clean
+
+
 def resolve_partner_reference(conn, partner_type: str, partner_code: str = "", partner_name: str = ""):
     ptype = normalize_partner_type(partner_type)
     code = safe(partner_code).strip()
     name = safe(partner_name).strip()
     if not ptype:
         return "", None
+    code_candidates = _partner_lookup_candidates(code)
+    name_candidates = _partner_lookup_candidates(name)
 
     if ptype in ("customer", "vendor"):
-        if code:
+        for code_candidate in code_candidates:
             row = conn.execute("""
                 SELECT id, code, name
                 FROM partners
                 WHERE LOWER(COALESCE(partner_type, '')) = ?
                   AND LOWER(COALESCE(code, '')) = ?
                 LIMIT 1
-            """, (ptype, code.lower())).fetchone()
+            """, (ptype, code_candidate.lower())).fetchone()
             if row:
                 return ptype, row["id"]
 
-        if name:
+        for name_candidate in name_candidates:
             row = conn.execute("""
                 SELECT id, code, name
                 FROM partners
                 WHERE LOWER(COALESCE(partner_type, '')) = ?
                   AND LOWER(COALESCE(name, '')) = ?
                 LIMIT 1
-            """, (ptype, name.lower())).fetchone()
+            """, (ptype, name_candidate.lower())).fetchone()
             if row:
                 return ptype, row["id"]
 
-            wanted = _normalize_lookup_text(name)
+        if name:
+            wanted_values = [_normalize_lookup_text(candidate) for candidate in name_candidates]
             candidates = conn.execute("""
                 SELECT id, code, name
                 FROM partners
                 WHERE LOWER(COALESCE(partner_type, '')) = ?
                 ORDER BY id
             """, (ptype,)).fetchall()
-            exact = [r for r in candidates if _normalize_lookup_text(r["name"]) == wanted]
+            exact = [r for r in candidates if _normalize_lookup_text(r["name"]) in wanted_values]
             if len(exact) == 1:
                 return ptype, exact[0]["id"]
-            partial = [r for r in candidates if wanted and (wanted in _normalize_lookup_text(r["name"]) or _normalize_lookup_text(r["name"]) in wanted)]
+            partial = [
+                r for r in candidates
+                for wanted in wanted_values
+                if wanted and (wanted in _normalize_lookup_text(r["name"]) or _normalize_lookup_text(r["name"]) in wanted)
+            ]
+            partial = list({r["id"]: r for r in partial}.values())
             if len(partial) == 1:
                 return ptype, partial[0]["id"]
 
         raise Exception(f"{ptype.title()} not found for code/name: {code or name}")
 
     if ptype == "employee":
-        if code:
+        for code_candidate in code_candidates:
             row = conn.execute("""
                 SELECT id, code
                 FROM employees
                 WHERE LOWER(COALESCE(code, '')) = ?
                 LIMIT 1
-            """, (code.lower(),)).fetchone()
+            """, (code_candidate.lower(),)).fetchone()
             if row:
                 return ptype, row["id"]
 
-        if name:
+        for name_candidate in name_candidates:
             row = conn.execute("""
                 SELECT id, code
                 FROM employees
@@ -254,21 +288,27 @@ def resolve_partner_reference(conn, partner_type: str, partner_code: str = "", p
                    OR LOWER(COALESCE(employee_name, '')) = ?
                    OR LOWER(COALESCE(full_name, '')) = ?
                 LIMIT 1
-            """, (name.lower(), name.lower(), name.lower())).fetchone()
+            """, (name_candidate.lower(), name_candidate.lower(), name_candidate.lower())).fetchone()
             if row:
                 return ptype, row["id"]
 
-            wanted = _normalize_lookup_text(name)
+        if name:
+            wanted_values = [_normalize_lookup_text(candidate) for candidate in name_candidates]
             candidates = conn.execute("""
                 SELECT id, code,
                        COALESCE(full_name, employee_name, name, '') AS disp_name
                 FROM employees
                 ORDER BY id
             """).fetchall()
-            exact = [r for r in candidates if _normalize_lookup_text(r["disp_name"]) == wanted]
+            exact = [r for r in candidates if _normalize_lookup_text(r["disp_name"]) in wanted_values]
             if len(exact) == 1:
                 return ptype, exact[0]["id"]
-            partial = [r for r in candidates if wanted and (wanted in _normalize_lookup_text(r["disp_name"]) or _normalize_lookup_text(r["disp_name"]) in wanted)]
+            partial = [
+                r for r in candidates
+                for wanted in wanted_values
+                if wanted and (wanted in _normalize_lookup_text(r["disp_name"]) or _normalize_lookup_text(r["disp_name"]) in wanted)
+            ]
+            partial = list({r["id"]: r for r in partial}.values())
             if len(partial) == 1:
                 return ptype, partial[0]["id"]
 
@@ -567,6 +607,45 @@ def get_entry_totals(conn, journal_id: int):
     total_credit = q2(row["total_credit"] if row else 0)
     balanced = total_debit == total_credit
     return total_debit, total_credit, balanced
+
+
+def get_entry_filtered_line_totals(
+    conn,
+    journal_id: int,
+    account_code: str = "",
+    partner_type: str = "",
+    partner_id=0,
+):
+    where = ["journal_id = ?"]
+    params = [journal_id]
+
+    if safe(account_code):
+        where.append("COALESCE(account_code, '') = ?")
+        params.append(safe(account_code))
+
+    if safe(partner_type):
+        where.append("LOWER(COALESCE(partner_type, '')) = ?")
+        params.append(safe(partner_type).lower())
+
+    try:
+        partner_id_int = int(partner_id or 0)
+    except Exception:
+        partner_id_int = 0
+
+    if partner_id_int:
+        where.append("COALESCE(partner_id, 0) = ?")
+        params.append(partner_id_int)
+
+    row = conn.execute(f"""
+        SELECT
+            COALESCE(SUM(debit), 0) AS total_debit,
+            COALESCE(SUM(credit), 0) AS total_credit
+        FROM journal_lines
+        WHERE {" AND ".join(where)}
+    """, params).fetchone()
+    total_debit = q2(row["total_debit"] if row else 0)
+    total_credit = q2(row["total_credit"] if row else 0)
+    return total_debit, total_credit
 
 
 def partner_type_options(selected_value="", lang: str = "en"):
@@ -2043,8 +2122,18 @@ def journal_list(
     body = ""
     total_debit_sum = Decimal("0.00")
     total_credit_sum = Decimal("0.00")
+    line_filter_active = bool(safe(account_code) or safe(partner_type) or partner_id_int)
     for row in rows:
-        total_debit, total_credit, balanced = get_entry_totals(conn, row["id"])
+        if line_filter_active:
+            total_debit, total_credit = get_entry_filtered_line_totals(
+                conn,
+                row["id"],
+                account_code=account_code,
+                partner_type=partner_type,
+                partner_id=partner_id_int,
+            )
+        else:
+            total_debit, total_credit, balanced = get_entry_totals(conn, row["id"])
         total_debit_sum += total_debit
         total_credit_sum += total_credit
         badge = {
@@ -2204,8 +2293,8 @@ def journal_list(
                         <th>{tr(lang, "Category", "الفئة")}</th>
                         <th>{tr(lang, "Description", "البيان")}</th>
                         <th>{tr(lang, "Reference", "المرجع")}</th>
-                        <th class="text-right">{tr(lang, "Total Debit", "إجمالي المدين")}</th>
-                        <th class="text-right">{tr(lang, "Total Credit", "إجمالي الدائن")}</th>
+                        <th class="text-right">{tr(lang, "Debit", "مدين") if line_filter_active else tr(lang, "Total Debit", "إجمالي المدين")}</th>
+                        <th class="text-right">{tr(lang, "Credit", "دائن") if line_filter_active else tr(lang, "Total Credit", "إجمالي الدائن")}</th>
                         <th>{tr(lang, "Status", "الحالة")}</th>
                         <th>{tr(lang, "Actions", "الإجراءات")}</th>
                     </tr>
