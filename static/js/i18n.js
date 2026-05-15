@@ -21,6 +21,39 @@
         "Settings": "الإعدادات",
         "Configuration": "الإعدادات",
         "System Setup": "تهيئة النظام",
+        "Operations Workflow Guide": "دليل دورة التشغيل",
+        "Operational Flow": "دورة التشغيل",
+        "Master Data": "البيانات الأساسية",
+        "Customer Stock": "أرصدة مخازن العميل",
+        "Customer Warehouses": "مخازن العميل",
+        "Custody Movements": "حركات عهدة العميل",
+        "Trip Tickets": "أوامر الرحلات",
+        "Pricing Versions": "إصدارات التسعير",
+        "Workflow Guide": "دليل دورة التشغيل",
+        "Work Orders": "أوامر الشغل",
+        "Rental Offices": "مكاتب التأجير",
+        "Vehicles": "السيارات",
+        "Contract Companies": "شركات التعاقد",
+        "Fault Types": "أنواع الأعطال",
+        "Regions": "المناطق",
+        "Action Catalog": "كتالوج الأعمال",
+        "Vehicle Rates": "تسعير السيارات",
+        "Receive Faulty Modules": "استلام الموديولات العطلانة",
+        "Create Ticket": "إنشاء تذكرة",
+        "Create Work Order": "إنشاء أمر شغل",
+        "Issue To Maintenance": "صرف للصيانة",
+        "Repair And Partial Return": "الصيانة والرجوع الجزئي",
+        "Progress": "الموقف",
+        "Assign Resources": "توزيع الموارد",
+        "Issue Materials": "صرف الخامات",
+        "Closure": "الإغلاق",
+        "Incentive": "حافز الفني",
+        "Project Request": "طلب المشروع",
+        "Standard Kit": "الخامات القياسية",
+        "Planning Warehouse": "مخزن التخطيط",
+        "Rollout Approval": "اعتماد الرولاوت",
+        "Technician Execution": "تنفيذ الفني",
+        "Audit": "المراجعة",
 
         "Open": "فتح",
         "View": "عرض",
@@ -325,6 +358,9 @@
             if (el.alt) el.alt = translateString(el.alt);
             if (el.tagName === "OPTION" && el.textContent) el.textContent = translateString(el.textContent);
             if (el.tagName === "INPUT" && ["button", "submit", "reset"].includes(el.type) && el.value) {
+                el.value = translateString(el.value);
+            }
+            if (el.tagName === "INPUT" && el.readOnly && el.value) {
                 el.value = translateString(el.value);
             }
         });

@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from auth import can
-from i18n import fix_mojibake
+from i18n import fix_mojibake, translate_static_ui
 
 
 _I18N_JS_PATH = Path(__file__).resolve().parent / "static" / "js" / "i18n.js"
@@ -248,6 +248,8 @@ def render_page(title, content, lang="en", current_path=""):
     company_name = _company_name_from_request(request)
     title = _repair_arabic_mojibake(str(title or ""))
     content = _repair_arabic_mojibake(str(content or ""))
+    title = translate_static_ui(title, lang)
+    content = translate_static_ui(content, lang)
     sidebar_items_html = _sidebar_menu_items(request, current_path, lang)
     module_back_href, module_back_label = _section_back_info(current_path, lang, request)
     module_home_href = _with_lang_url(module_back_href, lang, company_prefix)
