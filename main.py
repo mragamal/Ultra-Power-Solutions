@@ -237,7 +237,11 @@ async def auth_guard(request: Request, call_next):
     hydrate_session_from_cookie(request)
 
     if not is_logged_in(request):
-        return RedirectResponse("/login", status_code=302)
+        login_url = "/login"
+        lang = (request.query_params.get("lang") or "").strip()
+        if lang:
+            login_url = f"/login?lang={quote_plus(lang)}"
+        return RedirectResponse(login_url, status_code=302)
 
     module_code = module_for_path(path)
     if module_code and not can(request, module_code, "view"):

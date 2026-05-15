@@ -95,16 +95,53 @@ def _company_prefix(request: Request | None = None) -> str:
     return prefix.rstrip("/")
 
 
-def render_login_page(error_message: str = "", username: str = "", prefix: str = "") -> str:
-    error_html = f'<div class="login-alert">{error_message}</div>' if error_message else ""
+LOGIN_AR = {
+    "Premium One ERP Login": "تسجيل الدخول | Premium One ERP",
+    "Welcome Back": "أهلا بعودتك",
+    "Sign in to your Premium One ERP account": "سجل الدخول إلى حسابك على Premium One ERP",
+    "Username": "اسم المستخدم",
+    "Password": "كلمة المرور",
+    "Enter your username": "اكتب اسم المستخدم",
+    "Enter your password": "اكتب كلمة المرور",
+    "Forgot Password?": "نسيت كلمة المرور؟",
+    "Sign In": "تسجيل الدخول",
+    "or": "أو",
+    "Sign in with SSO": "تسجيل الدخول الموحد",
+    "Secure & Reliable": "آمن وموثوق",
+    "Your data is safe with us": "بياناتك محفوظة بأمان",
+    "Fast & Efficient": "سريع وفعال",
+    "Save time and boost productivity": "يوفر الوقت ويرفع الإنتاجية",
+    "Smart Reporting": "تقارير ذكية",
+    "Real-time insights for better decisions": "مؤشرات لحظية لقرارات أفضل",
+    "Cloud Based": "متاح عبر السحابة",
+    "Access your data anytime, anywhere": "ادخل على بياناتك في أي وقت ومن أي مكان",
+    "Invalid username or password.": "اسم المستخدم أو كلمة المرور غير صحيحة.",
+    "This user is inactive.": "هذا المستخدم غير مفعل.",
+}
+
+
+def login_t(text: str, lang: str) -> str:
+    if lang == "ar":
+        return LOGIN_AR.get(text, text)
+    return text
+
+
+def render_login_page(error_message: str = "", username: str = "", prefix: str = "", lang: str = "en") -> str:
+    lang = "ar" if (lang or "").lower() == "ar" else "en"
+    html_dir = "rtl" if lang == "ar" else "ltr"
+    page_title = login_t("Premium One ERP Login", lang)
+    error_text = login_t(error_message, lang) if error_message else ""
+    error_html = f'<div class="login-alert">{escape(error_text)}</div>' if error_text else ""
     login_action = f"{prefix}/login" if prefix else "/login"
+    if lang == "ar":
+        login_action += "?lang=ar"
     return f"""
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="{lang}" dir="{html_dir}">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Premium One ERP Login</title>
+        <title>{escape(page_title)}</title>
         <style>
             * {{
                 box-sizing: border-box;
@@ -444,6 +481,12 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                     width: 440px;
                 }}
             }}
+            html[dir="rtl"] .helper-row {{
+                justify-content: flex-start;
+            }}
+            html[dir="rtl"] .input-wrap {{
+                flex-direction: row-reverse;
+            }}
         </style>
     </head>
     <body>
@@ -455,13 +498,14 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                 </div>
 
                 <div class="login-card">
-                    <h1>Welcome Back</h1>
-                    <div class="login-sub">Sign in to your Premium One ERP account</div>
+                    <h1>{escape(login_t("Welcome Back", lang))}</h1>
+                    <div class="login-sub">{escape(login_t("Sign in to your Premium One ERP account", lang))}</div>
                     {error_html}
 
                     <form method="post" action="{login_action}">
+                        <input type="hidden" name="lang" value="{lang}">
                         <div class="field">
-                            <label>Username</label>
+                            <label>{escape(login_t("Username", lang))}</label>
                             <div class="input-wrap">
                                 <span class="input-icon">
                                     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -469,12 +513,12 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                                         <path d="M4.5 20a7.5 7.5 0 0 1 15 0"/>
                                     </svg>
                                 </span>
-                                <input name="username" value="{username}" placeholder="Enter your username" required>
+                                <input name="username" value="{escape(username)}" placeholder="{escape(login_t("Enter your username", lang))}" required>
                             </div>
                         </div>
 
                         <div class="field">
-                            <label>Password</label>
+                            <label>{escape(login_t("Password", lang))}</label>
                             <div class="input-wrap">
                                 <span class="input-icon">
                                     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -482,7 +526,7 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                                         <path d="M8 11V8a4 4 0 1 1 8 0v3"/>
                                     </svg>
                                 </span>
-                                <input id="password" type="password" name="password" placeholder="Enter your password" required>
+                                <input id="password" type="password" name="password" placeholder="{escape(login_t("Enter your password", lang))}" required>
                                 <button class="toggle-eye" type="button" onclick="togglePassword()" aria-label="Toggle password">
                                     <svg viewBox="0 0 24 24" aria-hidden="true">
                                         <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/>
@@ -494,25 +538,25 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                         </div>
 
                         <div class="helper-row">
-                            <a href="#">Forgot Password?</a>
+                            <a href="#">{escape(login_t("Forgot Password?", lang))}</a>
                         </div>
 
                         <button class="login-btn" type="submit">
-                            <span>Sign In</span>
+                            <span>{escape(login_t("Sign In", lang))}</span>
                             <svg viewBox="0 0 24 24" aria-hidden="true" style="width:20px;height:20px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;">
                                 <path d="M5 12h14"/>
                                 <path d="m13 5 7 7-7 7"/>
                             </svg>
                         </button>
 
-                        <div class="divider">or</div>
+                        <div class="divider">{escape(login_t("or", lang))}</div>
 
                         <button class="ghost-btn" type="button">
                             <svg viewBox="0 0 24 24" aria-hidden="true" style="width:20px;height:20px;stroke:#17345f;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;">
                                 <path d="M12 3 5 6v5c0 4.7 3.2 8.8 7 10 3.8-1.2 7-5.3 7-10V6l-7-3Z"/>
                                 <path d="m9.5 12 1.8 1.8 3.6-4"/>
                             </svg>
-                            <span>Sign in with SSO</span>
+                            <span>{escape(login_t("Sign in with SSO", lang))}</span>
                         </button>
 
                         <div class="login-note">
@@ -530,8 +574,8 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                             <path d="m24 32 5 5 11-12"/>
                         </svg>
                     </div>
-                    <div class="feature-title">Secure & Reliable</div>
-                    <div class="feature-sub">Your data is safe with us</div>
+                    <div class="feature-title">{escape(login_t("Secure & Reliable", lang))}</div>
+                    <div class="feature-sub">{escape(login_t("Your data is safe with us", lang))}</div>
                 </div>
                 <div class="feature">
                     <div class="feature-icon">
@@ -541,8 +585,8 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                             <path d="M32 12v4M12 32h4M48 32h4M32 48v4"/>
                         </svg>
                     </div>
-                    <div class="feature-title">Fast & Efficient</div>
-                    <div class="feature-sub">Save time and boost productivity</div>
+                    <div class="feature-title">{escape(login_t("Fast & Efficient", lang))}</div>
+                    <div class="feature-sub">{escape(login_t("Save time and boost productivity", lang))}</div>
                 </div>
                 <div class="feature">
                     <div class="feature-icon">
@@ -554,8 +598,8 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                             <path d="m18 30 12-10 12-6 8-6"/>
                         </svg>
                     </div>
-                    <div class="feature-title">Smart Reporting</div>
-                    <div class="feature-sub">Real-time insights for better decisions</div>
+                    <div class="feature-title">{escape(login_t("Smart Reporting", lang))}</div>
+                    <div class="feature-sub">{escape(login_t("Real-time insights for better decisions", lang))}</div>
                 </div>
                 <div class="feature">
                     <div class="feature-icon">
@@ -564,8 +608,8 @@ def render_login_page(error_message: str = "", username: str = "", prefix: str =
                             <path d="m24 38 6 6 10-12"/>
                         </svg>
                     </div>
-                    <div class="feature-title">Cloud Based</div>
-                    <div class="feature-sub">Access your data anytime, anywhere</div>
+                    <div class="feature-title">{escape(login_t("Cloud Based", lang))}</div>
+                    <div class="feature-sub">{escape(login_t("Access your data anytime, anywhere", lang))}</div>
                 </div>
             </div>
 
@@ -588,7 +632,7 @@ def login_form(request: Request):
     if user:
         return RedirectResponse(default_home_path_for_user(request), status_code=302)
 
-    return HTMLResponse(render_login_page(prefix=_company_prefix(request)))
+    return HTMLResponse(render_login_page(prefix=_company_prefix(request), lang=get_lang(request)))
 
 
 @router.post("/login")
@@ -609,7 +653,10 @@ def login_submit(
             path=request.scope.get("original_path") or request.url.path,
             method=request.method,
         )
-        return HTMLResponse(render_login_page("Invalid username or password.", (username or "").strip(), _company_prefix(request)), status_code=400)
+        return HTMLResponse(
+            render_login_page("Invalid username or password.", (username or "").strip(), _company_prefix(request), get_lang(request)),
+            status_code=400,
+        )
 
     if not bool(user["is_active"]):
         safe_log_action(
@@ -623,7 +670,10 @@ def login_submit(
             path=request.scope.get("original_path") or request.url.path,
             method=request.method,
         )
-        return HTMLResponse(render_login_page("This user is inactive.", (username or "").strip(), _company_prefix(request)), status_code=400)
+        return HTMLResponse(
+            render_login_page("This user is inactive.", (username or "").strip(), _company_prefix(request), get_lang(request)),
+            status_code=400,
+        )
 
     if not verify_password(password, user["password_hash"]):
         safe_log_action(
@@ -637,7 +687,10 @@ def login_submit(
             path=request.scope.get("original_path") or request.url.path,
             method=request.method,
         )
-        return HTMLResponse(render_login_page("Invalid username or password.", (username or "").strip(), _company_prefix(request)), status_code=400)
+        return HTMLResponse(
+            render_login_page("Invalid username or password.", (username or "").strip(), _company_prefix(request), get_lang(request)),
+            status_code=400,
+        )
 
     login_user(request, user)
     safe_log_request_action(
