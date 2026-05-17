@@ -63,6 +63,49 @@ def to_int_flag(v):
         return 0
 
 
+CASH_PAYMENT_SOURCE = "cash_payment"
+DIRECT_EXPENSE_SOURCES = {"petty_cash", "employee_custody"}
+
+
+def normalize_payment_source(value):
+    source = safe(value).lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "cash_payment": CASH_PAYMENT_SOURCE,
+        "cash": "cash",
+        "bank": "bank",
+        "petty": "petty_cash",
+        "petty_cash": "petty_cash",
+        "custody": "employee_custody",
+        "employee_custody": "employee_custody",
+    }
+    return aliases.get(source, source or CASH_PAYMENT_SOURCE)
+
+
+def is_direct_expense_source(source):
+    return normalize_payment_source(source) in DIRECT_EXPENSE_SOURCES
+
+
+def looks_like_custody_settlement(description):
+    text = safe(description).lower()
+    return (
+        "تسوية عهدة" in text
+        or "تسويه عهدة" in text
+        or "custody settlement" in text
+        or "custody adjustment" in text
+    )
+
+
+def resolve_expense_payment_source(form_source, description, employee_id):
+    payment_source = normalize_payment_source(form_source)
+    if looks_like_custody_settlement(description) and employee_id:
+        return "employee_custody"
+    return payment_source
+
+
+def expense_status_for_source(source):
+    return "draft" if is_direct_expense_source(source) else "pending_payment"
+
+
 def safe_log(entity_type, entity_id, action, notes="", done_by="admin"):
     if not log_action:
         return
@@ -435,7 +478,7 @@ def cost_center_options(lang="en"):
 
 
 def get_credit_account_by_source(source):
-    source = safe(source)
+    source = normalize_payment_source(source)
     if source == "cash":
         return get_setting_value("default_cash_account", "")
     if source == "bank":
@@ -549,7 +592,8 @@ def delete_linked_draft_payment(conn, payment_row):
 # JOURNAL LOGIC
 # =========================================================
 def build_expense_journal_lines(conn, expense_row, expense_lines):
-    credit_account = get_credit_account_by_source(expense_row["payment_source"])
+    payment_source = normalize_payment_source(expense_row["payment_source"])
+    credit_account = get_credit_account_by_source(payment_source)
     if not credit_account:
         raise Exception("Please configure the default account for the selected payment source first.")
 
@@ -581,7 +625,7 @@ def build_expense_journal_lines(conn, expense_row, expense_lines):
 
     credit_partner_type = None
     credit_partner_id = None
-    if expense_row["payment_source"] in ("petty_cash", "employee_custody") and expense_row["employee_id"]:
+    if payment_source in ("petty_cash", "employee_custody") and expense_row["employee_id"]:
         credit_partner_type = "employee"
         credit_partner_id = expense_row["employee_id"]
 
@@ -644,6 +688,57 @@ def rebuild_draft_journal_for_expense(conn, expense_id: int):
     return create_draft_journal_for_expense(conn, expense_id)
 
 
+def normalize_existing_custody_settlement_expenses():
+    conn = get_conn()
+    try:
+        voucher_filter = ""
+        if table_exists(conn, "cash_vouchers"):
+            voucher_filter = """
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM cash_vouchers cv
+                  WHERE LOWER(COALESCE(cv.source_type, '')) = 'expense'
+                    AND COALESCE(cv.source_id, 0) = e.id
+                    AND LOWER(COALESCE(cv.status, '')) <> 'reversed'
+              )
+            """
+
+        rows = conn.execute(f"""
+            SELECT e.id
+            FROM expenses e
+            WHERE LOWER(REPLACE(REPLACE(COALESCE(e.payment_source, ''), ' ', '_'), '-', '_')) = ?
+              AND LOWER(COALESCE(e.status, '')) = 'pending_payment'
+              AND e.journal_id IS NULL
+              AND e.employee_id IS NOT NULL
+              AND (
+                  COALESCE(e.description, '') LIKE '%تسوية عهدة%'
+                  OR COALESCE(e.description, '') LIKE '%تسويه عهدة%'
+                  OR LOWER(COALESCE(e.description, '')) LIKE '%custody settlement%'
+                  OR LOWER(COALESCE(e.description, '')) LIKE '%custody adjustment%'
+              )
+              {voucher_filter}
+        """, (CASH_PAYMENT_SOURCE,)).fetchall()
+
+        for row in rows:
+            conn.execute(
+                "UPDATE expenses SET payment_source = ? WHERE id = ?",
+                ("employee_custody", row["id"]),
+            )
+            create_draft_journal_for_expense(conn, row["id"])
+            safe_log(
+                "expense",
+                row["id"],
+                "repair",
+                "Custody settlement converted to direct expense journal.",
+                "System",
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 # =========================================================
 # UI HELPERS
 # =========================================================
@@ -663,6 +758,7 @@ def build_expense_form_html(lang, action_url, error_message="", form_data=None, 
     expense_date = form_data.get("expense_date") or ""
     description = form_data.get("description") or ""
     employee_id = form_data.get("employee_id") or ""
+    payment_source = normalize_payment_source(form_data.get("payment_source") or CASH_PAYMENT_SOURCE)
     attachments = form_data.get("attachments") or []
     existing_attachment_html = attachment_gallery(attachments) if attachments else ""
     attachment_required = "required" if not attachments else ""
@@ -694,7 +790,7 @@ def build_expense_form_html(lang, action_url, error_message="", form_data=None, 
                     <label>{tr(lang, 'Description', 'البيان')}</label>
                     <input name="description" value="{description}" required>
                 </div>
-                <input type="hidden" name="payment_source" value="cash_payment">
+                <input type="hidden" name="payment_source" value="{payment_source}">
             </div>
 
             <div class="row" id="employeeRow" style="margin-top:14px; display:none;">
@@ -823,6 +919,7 @@ def build_expense_form_html(lang, action_url, error_message="", form_data=None, 
 @router.get("/ui/accounting/expenses", response_class=HTMLResponse)
 def expenses_list(request: Request):
     lang = get_lang(request)
+    normalize_existing_custody_settlement_expenses()
     conn = get_conn()
 
     rows = conn.execute("""
@@ -890,9 +987,10 @@ async def save_expense(request: Request):
     expense_no = safe(form.get("expense_no")) or next_expense_no()
     expense_date = safe(form.get("expense_date"))
     description = safe(form.get("description"))
-    payment_source = "cash_payment"
     employee_id_raw = safe(form.get("employee_id"))
     employee_id = int(employee_id_raw) if employee_id_raw.isdigit() else None
+    payment_source = resolve_expense_payment_source(form.get("payment_source"), description, employee_id)
+    initial_status = expense_status_for_source(payment_source)
 
     form_data = {
         "expense_no": expense_no,
@@ -922,13 +1020,14 @@ async def save_expense(request: Request):
                 expense_no, expense_date, description,
                 payment_source, employee_id, total_amount, status
             )
-            VALUES (?, ?, ?, ?, ?, 0, 'pending_payment')
+            VALUES (?, ?, ?, ?, ?, 0, ?)
         """, (
             expense_no,
             expense_date,
             description,
             payment_source,
             employee_id,
+            initial_status,
         ))
         expense_id = cur.lastrowid
         insert_expense_attachments(conn, expense_id, new_attachments)
@@ -977,6 +1076,9 @@ async def save_expense(request: Request):
             WHERE id = ?
         """, (float(total), expense_id))
 
+        if is_direct_expense_source(payment_source):
+            create_draft_journal_for_expense(conn, expense_id)
+
         conn.commit()
 
     except Exception as e:
@@ -997,7 +1099,9 @@ async def save_expense(request: Request):
         "expense",
         expense_id,
         "create",
-        "Expense created and waiting for cash payment.",
+        "Custody settlement expense created with a direct draft journal."
+        if is_direct_expense_source(payment_source)
+        else "Expense created and waiting for cash payment.",
         "admin"
     )
 
@@ -1007,6 +1111,7 @@ async def save_expense(request: Request):
 @router.get("/ui/accounting/expenses/{expense_id}", response_class=HTMLResponse)
 def open_expense(request: Request, expense_id: int):
     lang = get_lang(request)
+    normalize_existing_custody_settlement_expenses()
     conn = get_conn()
 
     expense = get_expense(conn, expense_id)
@@ -1057,6 +1162,7 @@ def open_expense(request: Request, expense_id: int):
         logs_html = "<div>No activity log found.</div>"
 
     has_payment = bool(payment)
+    payment_source = normalize_payment_source(expense["payment_source"])
     edit_btn = f'<a class="btn blue" href="/ui/accounting/expenses/{expense_id}/edit">Edit</a>' if is_manageable else ""
     delete_btn = ""
     if is_manageable:
@@ -1068,7 +1174,7 @@ def open_expense(request: Request, expense_id: int):
 
     post_btn = ""
 
-    if not has_payment and safe(expense["status"]).lower() in ("draft", "pending_payment"):
+    if payment_source == CASH_PAYMENT_SOURCE and not has_payment and safe(expense["status"]).lower() in ("draft", "pending_payment"):
         post_btn = f"""
         <a class="btn green" href="/ui/accounting/cash-payments/new?source_type=expense&expense_id={expense_id}&amount={expense['total_amount']}">Pay</a>
         """
@@ -1189,9 +1295,13 @@ async def update_expense(request: Request, expense_id: int):
 
     expense_date = safe(form.get("expense_date"))
     description = safe(form.get("description"))
-    payment_source = "cash_payment"
     employee_id_raw = safe(form.get("employee_id"))
     employee_id = int(employee_id_raw) if employee_id_raw.isdigit() else None
+    payment_source = resolve_expense_payment_source(
+        form.get("payment_source") or expense["payment_source"],
+        description,
+        employee_id,
+    )
 
     form_data = {
         "expense_no": expense["expense_no"] or "",
@@ -1278,6 +1388,15 @@ async def update_expense(request: Request, expense_id: int):
         payment = get_expense_payment(conn, expense_id)
         if payment:
             delete_linked_draft_payment(conn, payment)
+
+        if is_direct_expense_source(payment_source):
+            if expense["journal_id"]:
+                rebuild_draft_journal_for_expense(conn, expense_id)
+            else:
+                create_draft_journal_for_expense(conn, expense_id)
+        else:
+            if expense["journal_id"]:
+                delete_draft_journal_entry(conn, expense["journal_id"])
             conn.execute(
                 """
                 UPDATE expenses

@@ -571,6 +571,20 @@ def account_label(conn, account_code):
     return f"{safe(row['code'])} - {safe(row['name'])}"
 
 
+def account_is_expense(conn, account_code):
+    if not safe(account_code):
+        return False
+    row = conn.execute(
+        "SELECT type, statement_type FROM accounts WHERE code = ? LIMIT 1",
+        (safe(account_code),),
+    ).fetchone()
+    if not row:
+        return False
+    account_type = safe(row["type"]).lower()
+    statement_type = safe(row["statement_type"]).lower()
+    return account_type == "expense" or statement_type == "profit_loss"
+
+
 def liquidity_account_options(conn, selected_code=""):
     rows = conn.execute(
         """
@@ -3435,6 +3449,7 @@ def payroll_post(run_id: int):
                 COALESCE(SUM(other_allowance), 0) AS total_other,
                 COALESCE(SUM(overtime_amount), 0) AS total_overtime,
                 COALESCE(SUM(bonus_amount), 0) AS total_bonus,
+                COALESCE(SUM(deduction_amount), 0) AS total_manual_deduction,
                 COALESCE(SUM(absence_deduction), 0) AS total_absence,
                 COALESCE(SUM(advance_deduction), 0) AS total_advance,
                 COALESCE(SUM(insurance_employee_amount), 0) AS total_insurance_employee,
@@ -3452,6 +3467,7 @@ def payroll_post(run_id: int):
         total_other = float(lines["total_other"] or 0)
         total_overtime = float(lines["total_overtime"] or 0)
         total_bonus = float(lines["total_bonus"] or 0)
+        total_manual_deduction = float(lines["total_manual_deduction"] or 0)
         total_absence = float(lines["total_absence"] or 0)
         total_advance = float(lines["total_advance"] or 0)
         total_insurance_employee = float(lines["total_insurance_employee"] or 0)
@@ -3465,20 +3481,24 @@ def payroll_post(run_id: int):
         overtime_acct = get_setting_value("payroll_overtime_account", "", conn=conn)
         bonus_acct = get_setting_value("payroll_bonus_account", "", conn=conn)
         absence_acct = get_setting_value("payroll_absence_account", "", conn=conn)
+        deduction_acct = get_setting_value("payroll_deduction_account", "", conn=conn) or absence_acct
         advance_acct = get_setting_value("payroll_advance_account", "", conn=conn)
         insurance_employee_acct = get_setting_value("payroll_insurance_employee_account", "", conn=conn)
         insurance_employer_acct = get_setting_value("payroll_insurance_employer_account", "", conn=conn)
+        insurance_employer_expense_acct = get_setting_value("payroll_insurance_employer_expense_account", "", conn=conn)
         payable_acct = get_setting_value("payroll_payable_account", "201020108", conn=conn)
 
         journal_lines = []
         line_no = 1
+        employer_insurance_payable = total_insurance_employer if insurance_employer_acct else 0
+        salary_debit_total = total_basic + employer_insurance_payable
 
-        if total_basic > 0 and salary_acct:
+        if salary_debit_total > 0 and salary_acct:
             journal_lines.append({
                 "line_no": line_no,
                 "line_description": f"Payroll {safe(run['payroll_no'])} - Basic Salary",
                 "account_code": salary_acct,
-                "debit": total_basic,
+                "debit": salary_debit_total,
                 "credit": 0,
                 "partner_type": "",
                 "partner_id": None,
@@ -3557,6 +3577,18 @@ def payroll_post(run_id: int):
             })
             line_no += 1
 
+        if total_manual_deduction > 0 and deduction_acct:
+            journal_lines.append({
+                "line_no": line_no,
+                "line_description": f"Payroll {safe(run['payroll_no'])} - Penalties / Manual Deductions",
+                "account_code": deduction_acct,
+                "debit": 0,
+                "credit": total_manual_deduction,
+                "partner_type": "",
+                "partner_id": None,
+            })
+            line_no += 1
+
         if total_insurance_employee > 0 and insurance_employee_acct:
             journal_lines.append({
                 "line_no": line_no,
@@ -3581,36 +3613,22 @@ def payroll_post(run_id: int):
             })
             line_no += 1
 
-        if total_insurance_employer > 0 and insurance_employer_acct:
+        if employer_insurance_payable > 0:
             journal_lines.append({
                 "line_no": line_no,
-                "line_description": f"Payroll {safe(run['payroll_no'])} - Employer Insurance Expense",
+                "line_description": f"Payroll {safe(run['payroll_no'])} - Employer Insurance Payable",
                 "account_code": insurance_employer_acct,
-                "debit": total_insurance_employer,
-                "credit": 0,
+                "debit": 0,
+                "credit": employer_insurance_payable,
                 "partner_type": "",
                 "partner_id": None,
             })
             line_no += 1
-            
-            # Credit to balance employer insurance expense (using accrued expenses account)
-            accrued_expenses_acct = get_setting_value("accrued_expenses_account", "201020108", conn=conn)
-            if accrued_expenses_acct:
-                journal_lines.append({
-                    "line_no": line_no,
-                    "line_description": f"Payroll {safe(run['payroll_no'])} - Employer Insurance Payable",
-                    "account_code": accrued_expenses_acct,
-                    "debit": 0,
-                    "credit": total_insurance_employer,
-                    "partner_type": "",
-                    "partner_id": None,
-                })
-                line_no += 1
 
         # Calculate actual net payment (should be positive)
         # Employer insurance is company expense, NOT part of net payment to employees
         actual_net_payment = max(0, total_basic + total_housing + total_transport + total_other + total_overtime + total_bonus 
-                                - total_absence - total_advance - total_insurance_employee)
+                                - total_manual_deduction - total_absence - total_advance - total_insurance_employee)
         
         if actual_net_payment > 0 and payable_acct:
             journal_lines.append({

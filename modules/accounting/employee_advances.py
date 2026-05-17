@@ -66,6 +66,30 @@ def deduction_type_label(request: Request, value: str) -> str:
     return tr(request, "Installments", "أقساط")
 
 
+def to_int(value, default=0) -> int:
+    try:
+        text = safe(value).strip()
+        if not text:
+            return default
+        return int(float(text))
+    except Exception:
+        return default
+
+
+def deduction_period_from_inputs(advance_date: str, start_month, start_year) -> tuple[int, int]:
+    month = to_int(start_month)
+    year = to_int(start_year)
+    if 1 <= month <= 12 and year >= 1900:
+        return month, year
+
+    try:
+        parsed = datetime.strptime(safe(advance_date), "%Y-%m-%d")
+        return parsed.month, parsed.year
+    except Exception:
+        today = datetime.now()
+        return today.month, today.year
+
+
 def can_edit_or_delete_advance(row) -> bool:
     if not row:
         return False
@@ -954,8 +978,8 @@ def advances_update(
     amount: str = Form("0"),
     deduction_type: str = Form("installment"),
     installment_amount: str = Form("0"),
-    start_month: int = Form(...),
-    start_year: int = Form(...),
+    start_month: str = Form(""),
+    start_year: str = Form(""),
     notes: str = Form(""),
     is_opening_balance: str = Form(""),
     paid_before_start: str = Form("0"),
@@ -984,6 +1008,7 @@ def advances_update(
     if deduction_type == "installment" and monthly_installment <= 0:
         conn.close()
         return RedirectResponse(with_msg(request, f"{BASE_ROUTE}/{advance_id}/edit", tr(request, "Monthly installment is required for installment advances.", "قيمة القسط مطلوبة عند اختيار الأقساط.")), status_code=302)
+    deduction_month, deduction_year = deduction_period_from_inputs(advance_date, start_month, start_year)
 
     conn.execute(
         """
@@ -998,8 +1023,8 @@ def advances_update(
             amount_value,
             deduction_type,
             monthly_installment,
-            int(start_month or 0),
-            int(start_year or 0),
+            deduction_month,
+            deduction_year,
             safe(notes),
             is_ob,
             paid_ob,
@@ -1242,6 +1267,7 @@ def export_advances_excel(request: Request):
 @router.get(f"{BASE_ROUTE}/new", response_class=HTMLResponse)
 def advances_new(request: Request):
     lang = get_lang(request)
+    today = datetime.now()
     html = f"""
     <div class="card">
         <h2>{tr(request, "New Employee Advance", "ط³ظ„ظپط© ظ…ظˆط¸ظپ ط¬ط¯ظٹط¯ط©")}</h2>
@@ -1274,11 +1300,11 @@ def advances_new(request: Request):
                 <div class="col">
                     <label>{tr(request, "Deduction Type", "نوع الخصم")}</label>
                     <select name="deduction_type" id="deductionType" onchange="toggleInstallmentAmount()">
-                        <option value="direct">{tr(request, "Direct Salary Deduction", "خصم مباشر من المرتب")}</option>
-                        <option value="installment" selected>{tr(request, "Installments", "أقساط")}</option>
+                        <option value="direct" selected>{tr(request, "Direct Salary Deduction", "خصم مباشر من المرتب")}</option>
+                        <option value="installment">{tr(request, "Installments", "أقساط")}</option>
                     </select>
                 </div>
-                <div class="col" id="installmentAmountBox">
+                <div class="col" id="installmentAmountBox" style="display:none;">
                     <label>{tr(request, "Monthly Installment", "ط§ظ„ظ‚ط³ط· ط§ظ„ط´ظ‡ط±ظٹ")}</label>
                     <input type="number" step="0.01" min="0" name="installment_amount" id="installmentAmount">
                 </div>
@@ -1287,11 +1313,11 @@ def advances_new(request: Request):
             <div class="row" style="margin-top:14px;">
                 <div class="col">
                     <label>{tr(request, "Deduction Start Month", "ط´ظ‡ط± ط¨ط¯ط§ظٹط© ط§ظ„ط®طµظ…")}</label>
-                    <input type="number" min="1" max="12" name="start_month" required>
+                    <input type="number" min="1" max="12" name="start_month" value="{today.month}">
                 </div>
                 <div class="col">
                     <label>{tr(request, "Deduction Start Year", "ط³ظ†ط© ط¨ط¯ط§ظٹط© ط§ظ„ط®طµظ…")}</label>
-                    <input type="number" min="2020" max="2100" name="start_year" required>
+                    <input type="number" min="2020" max="2100" name="start_year" value="{today.year}">
                 </div>
             </div>
 
@@ -1363,8 +1389,8 @@ def advances_create(
     amount: str = Form("0"),
     deduction_type: str = Form("installment"),
     installment_amount: str = Form("0"),
-    start_month: int = Form(...),
-    start_year: int = Form(...),
+    start_month: str = Form(""),
+    start_year: str = Form(""),
     notes: str = Form(""),
     is_opening_balance: str = Form(""),
     paid_before_start: str = Form("0"),
@@ -1377,6 +1403,7 @@ def advances_create(
         return RedirectResponse(with_msg(request, BASE_ROUTE, tr(request, "Advance amount must be greater than zero.", "ظ‚ظٹظ…ط© ط§ظ„ط³ظ„ظپط© ظٹط¬ط¨ ط£ظ† طھظƒظˆظ† ط£ظƒط¨ط± ظ…ظ† طµظپط±.")), status_code=302)
     if deduction_type == "installment" and monthly_installment <= 0:
         return RedirectResponse(with_msg(request, BASE_ROUTE, tr(request, "Monthly installment is required for installment advances.", "قيمة القسط مطلوبة عند اختيار الأقساط.")), status_code=302)
+    deduction_month, deduction_year = deduction_period_from_inputs(advance_date, start_month, start_year)
 
     is_ob = 1 if is_opening_balance == "1" else 0
     paid_ob = max(to_float(paid_before_start), 0) if is_ob else 0.0
@@ -1398,8 +1425,8 @@ def advances_create(
             advance_total,
             deduction_type,
             monthly_installment,
-            int(start_month or 0),
-            int(start_year or 0),
+            deduction_month,
+            deduction_year,
             safe(notes),
             is_ob,
             paid_ob,
@@ -1866,6 +1893,7 @@ def advance_open(request: Request, advance_id: int):
         <div style="margin-top:16px; display:flex; gap:10px;">
             <a class="btn gray" href="{with_lang(request, BASE_ROUTE)}">{tr(request, "Back", "ط±ط¬ظˆط¹")}</a>
             {f'<a class="btn green" href="/ui/accounting/cash-payments/new?party_type=employee&employee_id={advance["employee_id"]}&employee_trans_type=advance&advance_id={advance["id"]}&amount={advance["amount"]}">{tr(request, "Disburse Advance", "طµط±ظپ ط§ظ„ط³ظ„ظپط©")}</a>' if safe(advance["status"]).lower() == "active" else ""}
+            {f'<a class="btn blue" href="/ui/accounting/cash-payments/new?party_type=employee&employee_id={advance["employee_id"]}&employee_trans_type=advance&advance_id={advance["id"]}&amount={advance["amount"]}&expense_payment_source=custody">{tr(request, "Disburse From Custody", "صرف من عهدة")}</a>' if safe(advance["status"]).lower() == "active" else ""}
             {f'<a class="btn orange" href="{with_lang(request, f"{BASE_ROUTE}/{advance["id"]}/edit")}">{tr(request, "Edit Schedule", "طھظˆط²ظٹط¹ ط§ظ„ط³ظ„ظپط©")}</a>' if can_edit_schedule else ""}
             {f'<form method="post" action="{with_lang(request, f"{BASE_ROUTE}/{advance["id"]}/delete")}" style="display:inline;" onsubmit="return confirm(\'{tr(request, "Are you sure you want to delete this advance?", "ظ‡ظ„ ط£ظ†طھ ظ…طھط£ظƒط¯ ظ…ظ† ط­ط°ظپ ظ‡ط°ظ‡ ط§ظ„ط³ظ„ظپط©طں")}\')"><button class="btn red" type="submit">{tr(request, "Delete", "ط­ط°ظپ")}</button></form>' if can_modify else ""}
             {f'<form method="post" action="{with_lang(request, f"{BASE_ROUTE}/{advance["id"]}/mark-disbursed")}" style="display:inline;"><button class="btn blue" type="submit">{tr(request, "Mark as Disbursed", "طھط­ط¯ظٹط¯ ظƒظ…طµط±ظˆظپط©")}</button></form>' if safe(advance["status"]).lower() == "active" else ""}

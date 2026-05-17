@@ -12,6 +12,7 @@ from layout import render_page
 from modules.accounting.allocation_engine import (
     create_payment_allocation,
     get_allocated_total_for_document,
+    get_document_allocations,
     get_payment_unallocated_amount,
     refresh_vendor_bill_payment_status,
 )
@@ -585,23 +586,108 @@ def calc_due_date(bill_date: str, payment_term_days) -> str:
 def available_vendor_cash_payments(conn, vendor_id: int):
     result = []
 
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM cash_vouchers
-        WHERE LOWER(COALESCE(voucher_type,'')) = 'payment'
-          AND LOWER(COALESCE(party_type,'')) = 'vendor'
-          AND COALESCE(party_id, 0) = ?
-          AND LOWER(COALESCE(status,'')) = 'posted'
-        ORDER BY voucher_date DESC, id DESC
-        """,
-        (vendor_id,),
-    ).fetchall()
-    for row in rows:
-        unapplied = get_payment_unallocated_amount(conn, "cash_payment", row["id"])
-        if unapplied > Decimal("0.00"):
-            label = f"{safe(row['voucher_no'])} | {safe(row['voucher_date'])} | Cash Payment | Available {money(unapplied)}"
-            result.append(("cash_payment", row, unapplied, label))
+    if get_columns(conn, "vendor_payments"):
+        try:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM vendor_payments
+                WHERE COALESCE(vendor_id, 0) = ?
+                  AND LOWER(COALESCE(status,'')) = 'posted'
+                ORDER BY payment_date DESC, id DESC
+                """,
+                (vendor_id,),
+            ).fetchall()
+            for row in rows:
+                unapplied = get_payment_unallocated_amount(conn, "vendor_payment", row["id"])
+                if unapplied > Decimal("0.00"):
+                    label = f"{safe(row['payment_no'])} | {safe(row['payment_date'])} | Vendor Payment | Available {money(unapplied)}"
+                    result.append(("vendor_payment", row, unapplied, label))
+        except Exception:
+            pass
+
+    if get_columns(conn, "cash_vouchers"):
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM cash_vouchers
+            WHERE LOWER(COALESCE(voucher_type,'')) = 'payment'
+              AND LOWER(COALESCE(party_type,'')) = 'vendor'
+              AND COALESCE(party_id, 0) = ?
+              AND LOWER(COALESCE(status,'')) = 'posted'
+            ORDER BY voucher_date DESC, id DESC
+            """,
+            (vendor_id,),
+        ).fetchall()
+        for row in rows:
+            unapplied = get_payment_unallocated_amount(conn, "cash_payment", row["id"])
+            if unapplied > Decimal("0.00"):
+                label = f"{safe(row['voucher_no'])} | {safe(row['voucher_date'])} | Cash Payment | Available {money(unapplied)}"
+                result.append(("cash_payment", row, unapplied, label))
+
+    excluded_journals = []
+    params = [vendor_id]
+    cash_cols = get_columns(conn, "cash_vouchers")
+    if "journal_id" in cash_cols:
+        excluded_journals.append(
+            """
+            j.id NOT IN (
+                SELECT COALESCE(journal_id, 0)
+                FROM cash_vouchers
+                WHERE LOWER(COALESCE(voucher_type,'')) = 'payment'
+                  AND LOWER(COALESCE(party_type,'')) = 'vendor'
+                  AND COALESCE(party_id, 0) = ?
+            )
+            """
+        )
+        params.append(vendor_id)
+    vendor_payment_cols = get_columns(conn, "vendor_payments")
+    if "journal_id" in vendor_payment_cols:
+        excluded_journals.append(
+            """
+            j.id NOT IN (
+                SELECT COALESCE(journal_id, 0)
+                FROM vendor_payments
+                WHERE COALESCE(vendor_id, 0) = ?
+            )
+            """
+        )
+        params.append(vendor_id)
+    exclude_sql = ""
+    if excluded_journals:
+        exclude_sql = "\n          AND " + "\n          AND ".join(excluded_journals)
+
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                l.id,
+                j.id AS journal_id,
+                j.entry_no,
+                j.entry_date,
+                j.reference,
+                COALESCE(NULLIF(l.line_description,''), NULLIF(j.description,''), '') AS description,
+                COALESCE(l.debit, 0) AS debit,
+                COALESCE(l.credit, 0) AS credit
+            FROM journal_lines l
+            JOIN journal_entries j ON j.id = l.journal_id
+            WHERE LOWER(COALESCE(j.status,'')) = 'posted'
+              AND LOWER(COALESCE(l.partner_type,'')) = 'vendor'
+              AND COALESCE(l.partner_id, 0) = ?
+              AND COALESCE(l.debit, 0) > COALESCE(l.credit, 0)
+              AND LOWER(COALESCE(j.category,'')) NOT IN ('vendor bill', 'reversal')
+              {exclude_sql}
+            ORDER BY j.entry_date DESC, j.id DESC, COALESCE(l.line_no, 0), l.id DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        for row in rows:
+            unapplied = get_payment_unallocated_amount(conn, "vendor_opening_journal", row["id"])
+            if unapplied > Decimal("0.00"):
+                label = f"{safe(row['entry_no'])} | {safe(row['entry_date'])} | Journal Payment | Available {money(unapplied)}"
+                result.append(("vendor_opening_journal", row, unapplied, label))
+    except Exception:
+        pass
 
     return result
 
@@ -2329,18 +2415,66 @@ async def allocate_vendor_cash_payment(request: Request, row_id: int):
     allocated_amount = to_decimal(form.get("allocated_amount"), "0")
     conn = get_conn()
     try:
-        if payment_type != "cash_payment":
-            raise Exception("Only cash payment vouchers can be allocated to vendor bills from this screen")
+        if payment_type not in {"cash_payment", "vendor_payment", "vendor_opening_journal"}:
+            raise Exception("Unsupported vendor payment source")
         row = conn.execute("SELECT * FROM vendor_bills WHERE id = ? LIMIT 1", (row_id,)).fetchone()
         if not row:
             raise Exception("Vendor bill not found")
         create_payment_allocation(conn, payment_type, voucher_id, "vendor_bill", row_id, allocated_amount)
         refresh_vendor_bill_payment_status(conn, row_id)
+        safe_log_action(
+            "vendor_bill",
+            row_id,
+            "Payment Allocated",
+            done_by=actor_name_from_request(request),
+            notes=f"Allocated {money(allocated_amount)} from {payment_type} #{voucher_id}.",
+            conn=conn,
+        )
         conn.commit()
     except Exception as e:
         conn.rollback()
         conn.close()
         return HTMLResponse(f"Allocation error: {safe(e)}", status_code=400)
+    conn.close()
+    return RedirectResponse(f"/ui/accounting/vendor-bills/{row_id}/view", status_code=303)
+
+
+@router.post("/ui/accounting/vendor-bills/{row_id}/allocations/{allocation_id}/delete")
+def delete_vendor_bill_allocation(request: Request, row_id: int, allocation_id: int):
+    if not accounting_allowed(request, "edit"):
+        return permission_denied("You do not have permission to remove vendor bill allocations.", "Permission denied.")
+
+    conn = get_conn()
+    try:
+        allocation = conn.execute(
+            """
+            SELECT *
+            FROM payment_allocations
+            WHERE id = ?
+              AND document_type = 'vendor_bill'
+              AND document_id = ?
+            LIMIT 1
+            """,
+            (allocation_id, row_id),
+        ).fetchone()
+        if not allocation:
+            raise Exception("Allocation not found")
+        conn.execute("DELETE FROM payment_allocations WHERE id = ?", (allocation_id,))
+        refresh_vendor_bill_payment_status(conn, row_id)
+        safe_log_action(
+            "vendor_bill",
+            row_id,
+            "Payment Allocation Removed",
+            done_by=actor_name_from_request(request),
+            notes=f"Removed allocation #{allocation_id}.",
+            conn=conn,
+        )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return HTMLResponse(f"Remove allocation error: {safe(e)}", status_code=400)
+
     conn.close()
     return RedirectResponse(f"/ui/accounting/vendor-bills/{row_id}/view", status_code=303)
 
@@ -2387,19 +2521,67 @@ def view_vendor_bill(request: Request, row_id: int):
 
     journal_is_final = vendor_bill_journal_final_posted(conn, row)
 
+    allocation_rows = get_document_allocations(conn, "vendor_bill", row_id)
+    allocation_rows_html = ""
+    for allocation in allocation_rows:
+        payment_label = safe(allocation["payment_type"]).replace("_", " ").title()
+        remove_button = ""
+        if can_edit_perm:
+            remove_button = (
+                f"<form method='post' action='/ui/accounting/vendor-bills/{row_id}/allocations/{allocation['id']}/delete' "
+                "style='display:inline;'>"
+                "<button class='btn red' type='submit'>Remove</button>"
+                "</form>"
+            )
+        allocation_rows_html += (
+            "<tr>"
+            f"<td>{payment_label} #{safe(allocation['payment_id'])}</td>"
+            f"<td>{money(allocation['allocated_amount'])}</td>"
+            f"<td>{safe(allocation['created_at'])}</td>"
+            f"<td>{remove_button}</td>"
+            "</tr>"
+        )
+
+    linked_allocations_html = ""
+    if allocation_rows_html:
+        linked_allocations_html = f"""
+        <div style="margin-top:14px;">
+            <h4>Allocated Payments</h4>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Payment Source</th>
+                        <th>Amount</th>
+                        <th>Created</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>{allocation_rows_html}</tbody>
+            </table>
+        </div>
+        """
+
     cash_allocations_html = ""
-    if safe(row["status"]).lower() == "posted" and journal_is_final and not row["reversed_journal_id"] and cash_payments:
+    can_show_vendor_cash_balance = (
+        safe(row["status"]).lower() == "posted"
+        and journal_is_final
+        and not row["reversed_journal_id"]
+        and (cash_payments or bool(allocation_rows_html))
+    )
+    if can_show_vendor_cash_balance:
         options = ""
         total_available = Decimal("0.00")
         for source_type, voucher, unapplied, option_label in cash_payments:
             total_available += unapplied
             options += f"<option value='{source_type}:{voucher['id']}'>{option_label}</option>"
+        allocation_form_style = "margin-top:14px;" if cash_payments and open_amount > Decimal("0.00") else "display:none;"
         cash_allocations_html = f"""
         <div class="card" style="margin-top:20px;">
             <h3>{'Vendor Cash Balance' if lang != 'ar' else 'رصيد المورد غير المخصص'}</h3>
             <p><b>{'Bill Open Amount' if lang != 'ar' else 'المتبقي على الفاتورة'}:</b> {money(open_amount)}</p>
             <p><b>{'Available Unallocated Payments' if lang != 'ar' else 'المتاح من سندات الصرف غير المخصصة'}:</b> {money(total_available)}</p>
-            <form method="post" action="/ui/accounting/vendor-bills/{row_id}/allocate-cash" style="margin-top:14px;">
+            {linked_allocations_html}
+            <form method="post" action="/ui/accounting/vendor-bills/{row_id}/allocate-cash" style="{allocation_form_style}">
                 <div class="row">
                     <div class="col">
                         <label>{'Cash Payment Voucher' if lang != 'ar' else 'سند الصرف'}</label>

@@ -946,7 +946,7 @@ def render_form(lang: str, voucher_type: str, action_url: str, values=None, erro
     if not safe(values.get("voucher_date")):
         values["voucher_date"] = date.today().isoformat()
     is_expense_payment = source_type == "expense" and bool(source_id)
-    show_payment_from = voucher_type == "payment" and source_type not in ("payroll_salary_payment", "employee_grant") and not (party_type == "employee" and trans_type in ("advance", "custody"))
+    show_payment_from = voucher_type == "payment" and source_type not in ("payroll_salary_payment", "employee_grant") and not (party_type == "employee" and trans_type == "custody")
     expense_payment_source = safe(values.get("expense_payment_source") or "liquidity").lower()
     if expense_payment_source in ("cash", "bank"):
         expense_payment_source = "liquidity"
@@ -1730,6 +1730,7 @@ def save_voucher(
         if expense_payment_source not in ("liquidity", "custody"):
             expense_payment_source = "liquidity"
         selected_expense_employee_id = safe_int(expense_employee_id)
+        trans_type_for_payment = safe(employee_trans_type).lower()
 
         if source_type == "expense":
             if voucher_type != "payment":
@@ -1771,15 +1772,43 @@ def save_voucher(
                 if available < q2(amount):
                     raise Exception(f"Employee custody balance is not enough. Available: {money(available)}")
 
-        if source_type != "expense" and voucher_type == "payment" and party_type in ("vendor", "other") and expense_payment_source == "custody":
+        custody_funded_non_expense = (
+            source_type != "expense"
+            and voucher_type == "payment"
+            and expense_payment_source == "custody"
+            and (
+                party_type in ("vendor", "other")
+                or (party_type == "employee" and trans_type_for_payment == "advance")
+            )
+        )
+        if custody_funded_non_expense:
             if selected_expense_employee_id <= 0:
-                raise Exception("Please select the employee whose custody will pay this vendor.")
+                raise Exception("Please select the employee whose custody will pay this voucher.")
             emp = conn.execute("SELECT id FROM employees WHERE id = ? LIMIT 1", (selected_expense_employee_id,)).fetchone()
             if not emp:
                 raise Exception("Selected custody employee was not found.")
             liquidity_account_code = employee_custody_account_code()
-            if employee_custody_balance(conn, selected_expense_employee_id) < q2(amount):
-                raise Exception(f"Employee custody balance is not enough. Available: {money(employee_custody_balance(conn, selected_expense_employee_id))}")
+            if not liquidity_account_code:
+                raise Exception("Please set Employee Custody Account in configuration.")
+            amount_for_balance_check = amount
+            if party_type == "employee" and trans_type_for_payment == "advance":
+                selected_advance_for_balance = safe_int(advance_id)
+                if selected_advance_for_balance > 0:
+                    advance_amount_row = conn.execute(
+                        """
+                        SELECT amount
+                        FROM employee_advances
+                        WHERE id = ?
+                          AND employee_id = ?
+                        LIMIT 1
+                        """,
+                        (selected_advance_for_balance, party_id),
+                    ).fetchone()
+                    if advance_amount_row:
+                        amount_for_balance_check = str(float(advance_amount_row["amount"] or 0))
+            available = employee_custody_balance(conn, selected_expense_employee_id)
+            if available < q2(amount_for_balance_check):
+                raise Exception(f"Employee custody balance is not enough. Available: {money(available)}")
 
         # For employee disbursements, amount must come from the selected request
         # (advance or custody request), not manual input.
@@ -2228,13 +2257,24 @@ def update_voucher(
         )
         if voucher_type == "payment" and party_type == "employee" and safe(employee_trans_type).lower() == "custody" and safe_int(custody_request_id) <= 0:
             raise Exception("Please select a custody request.")
-        if source_type != "expense" and voucher_type == "payment" and party_type in ("vendor", "other") and expense_payment_source == "custody":
+        custody_funded_non_expense = (
+            source_type != "expense"
+            and voucher_type == "payment"
+            and expense_payment_source == "custody"
+            and (
+                party_type in ("vendor", "other")
+                or (party_type == "employee" and safe(employee_trans_type).lower() == "advance")
+            )
+        )
+        if custody_funded_non_expense:
             if selected_expense_employee_id <= 0:
-                raise Exception("Please select the employee whose custody will pay this vendor.")
+                raise Exception("Please select the employee whose custody will pay this voucher.")
+            liquidity_account_code = employee_custody_account_code()
+            if not liquidity_account_code:
+                raise Exception("Please set Employee Custody Account in configuration.")
             available = employee_custody_balance(conn, selected_expense_employee_id)
             if available < q2(amount):
                 raise Exception(f"Employee custody balance is not enough. Available: {money(available)}")
-            liquidity_account_code = employee_custody_account_code()
         validate_voucher(voucher_date, party_name, party_type, party_id, liquidity_account_code, counter_account_code, amount, source_type)
         remove_draft_voucher_journal(conn, voucher)
         conn.execute(
